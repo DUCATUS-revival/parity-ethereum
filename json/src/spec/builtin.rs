@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -16,8 +16,10 @@
 
 //! Spec builtin deserialization.
 
-use uint::Uint;
 use std::collections::BTreeMap;
+
+use crate::uint::Uint;
+use serde::Deserialize;
 
 /// Linear pricing.
 #[derive(Debug, PartialEq, Deserialize, Clone)]
@@ -137,8 +139,6 @@ pub struct PricingAt {
 
 #[cfg(test)]
 mod tests {
-	use serde_json;
-	use uint::Uint;
 	use super::{Builtin, BuiltinCompat, BTreeMap, Pricing, PricingAt, Linear, Modexp, AltBn128ConstOperations};
 	use macros::map;
 
@@ -199,6 +199,28 @@ mod tests {
 			0xffffff => PricingAt {
 				info: None,
 				price: Pricing::Blake2F { gas_per_round: 123 }
+			}
+		]);
+	}
+
+	#[test]
+	fn deserialization_alt_bn128_const_operations() {
+		let s = r#"{
+			"name": "alt_bn128_mul",
+			"pricing": {
+				"100500": {
+					"price": { "alt_bn128_const_operations": { "price": 123 }}
+				}
+			}
+		}"#;
+		let builtin: Builtin = serde_json::from_str::<BuiltinCompat>(s).unwrap().into();
+		assert_eq!(builtin.name, "alt_bn128_mul");
+		assert_eq!(builtin.pricing, map![
+			100500 => PricingAt {
+				info: None,
+				price: Pricing::AltBn128ConstOperations(AltBn128ConstOperations { 
+					price: 123,
+				}),
 			}
 		]);
 	}

@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@ use jsonrpc_core::Error;
 use jsonrpc_derive::rpc;
 
 use v1::types::{Bytes, PrivateTransactionReceipt, BlockNumber,
-	PrivateTransactionReceiptAndTransaction, CallRequest};
+	PrivateTransactionReceiptAndTransaction, CallRequest, PrivateTransactionLog};
 
 /// Private transaction management RPC interface.
 #[rpc(server)]
@@ -35,7 +35,13 @@ pub trait Private {
 
 	/// Creates a transaction for contract's deployment from origin (signed transaction)
 	#[rpc(name = "private_composeDeploymentTransaction")]
-	fn compose_deployment_transaction(&self, _: BlockNumber, _: Bytes, _: Vec<H160>, _: U256) -> Result<PrivateTransactionReceiptAndTransaction, Error>;
+	fn compose_deployment_transaction(
+		&self,
+		_: BlockNumber,
+		_: Bytes,
+		_: Vec<H160>,
+		_: U256
+	) -> Result<PrivateTransactionReceiptAndTransaction, Error>;
 
 	/// Make a call to the private contract
 	#[rpc(name = "private_call")]
@@ -44,4 +50,8 @@ pub trait Private {
 	/// Retrieve the id of the key associated with the contract
 	#[rpc(name = "private_contractKey")]
 	fn private_contract_key(&self, _: H160) -> Result<H256, Error>;
+
+	/// Retrieve log information about private transaction
+	#[rpc(name = "private_log")]
+	fn private_log(&self, _: H256) -> Result<PrivateTransactionLog, Error>;
 }

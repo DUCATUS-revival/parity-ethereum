@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -21,21 +21,28 @@ use std::time::{Instant, Duration, SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 
 use rlp::Rlp;
-use ethereum_types::{Address, H64, H160, H256, U64, U256};
+use ethereum_types::{Address, H64, H160, H256, U64, U256, BigEndianHash};
 use parking_lot::Mutex;
 
+use account_state::state::StateInfo;
+use client_traits::{BlockChainClient, StateClient, ProvingBlockChainClient, StateOrBlock};
 use ethash::{self, SeedHashCompute};
-use ethcore::client::{BlockChainClient, BlockId, TransactionId, UncleId, StateOrBlock, StateClient, StateInfo, Call, EngineInfo, ProvingBlockChainClient};
+use ethcore::client::{Call, EngineInfo};
 use ethcore::miner::{self, MinerService};
-use ethcore::snapshot::SnapshotService;
+use snapshot::SnapshotService;
 use hash::keccak;
 use miner::external::ExternalMinerService;
 use sync::SyncProvider;
-use types::transaction::{SignedTransaction, LocalizedTransaction};
-use types::BlockNumber as EthBlockNumber;
-use types::encoded;
-use types::filter::Filter as EthcoreFilter;
-use types::header::Header;
+use types::{
+	BlockNumber as EthBlockNumber,
+	client_types::StateResult,
+	encoded,
+	header::Header,
+	ids::{BlockId, TransactionId, UncleId},
+	filter::Filter as EthcoreFilter,
+	transaction::{SignedTransaction, LocalizedTransaction},
+	snapshot::RestorationStatus,
+};
 
 use jsonrpc_core::{BoxFuture, Result};
 use jsonrpc_core::futures::future;
@@ -43,7 +50,6 @@ use jsonrpc_core::futures::future;
 use v1::helpers::{self, errors, limit_logs, fake_sign};
 use v1::helpers::deprecated::{self, DeprecationNotice};
 use v1::helpers::dispatch::{FullDispatcher, default_gas_price};
-use v1::helpers::block_import::is_major_importing;
 use v1::traits::Eth;
 use v1::types::{
 	RichBlock, Block, BlockTransactions, BlockNumber, Bytes, SyncStatus, SyncInfo,
@@ -109,7 +115,7 @@ pub struct EthClient<C, SN: ?Sized, S: ?Sized, M, EM> where
 	client: Arc<C>,
 	snapshot: Arc<SN>,
 	sync: Arc<S>,
-	accounts: Arc<Fn() -> Vec<Address> + Send + Sync>,
+	accounts: Arc<dyn Fn() -> Vec<Address> + Send + Sync>,
 	miner: Arc<M>,
 	external_miner: Arc<EM>,
 	seed_compute: Mutex<SeedHashCompute>,
@@ -177,10 +183,11 @@ pub fn base_logs<C, M, T: StateInfo + 'static> (client: &C, miner: &M, filter: F
 	Box::new(future::ok(logs))
 }
 
-impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> EthClient<C, SN, S, M, EM> where
+impl<C, SN: ?Sized, S: ?Sized, M, EM, T> EthClient<C, SN, S, M, EM> where
 	C: miner::BlockChainClient + BlockChainClient + StateClient<State=T> + Call<State=T> + EngineInfo,
 	SN: SnapshotService,
 	S: SyncProvider,
+	T: StateInfo + 'static,
 	M: MinerService<State=T>,
 	EM: ExternalMinerService {
 
@@ -189,7 +196,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> EthClient<C, SN, S
 		client: &Arc<C>,
 		snapshot: &Arc<SN>,
 		sync: &Arc<S>,
-		accounts: &Arc<Fn() -> Vec<Address> + Send + Sync>,
+		accounts: &Arc<dyn Fn() -> Vec<Address> + Send + Sync>,
 		miner: &Arc<M>,
 		em: &Arc<EM>,
 		options: EthClientOptions
@@ -243,6 +250,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> EthClient<C, SN, S
 
 			BlockNumberOrId::Number(num) => {
 				let id = match num {
+					BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 					BlockNumber::Latest => BlockId::Latest,
 					BlockNumber::Earliest => BlockId::Earliest,
 					BlockNumber::Num(n) => BlockId::Number(n),
@@ -439,6 +447,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> EthClient<C, SN, S
 	/// if no state found for the best pending block.
 	fn get_state(&self, number: BlockNumber) -> StateOrBlock {
 		match number {
+			BlockNumber::Hash { hash, .. } => BlockId::Hash(hash).into(),
 			BlockNumber::Num(num) => BlockId::Number(num).into(),
 			BlockNumber::Earliest => BlockId::Earliest.into(),
 			BlockNumber::Latest => BlockId::Latest.into(),
@@ -502,6 +511,19 @@ fn check_known<C>(client: &C, number: BlockNumber) -> Result<()> where C: BlockC
 		BlockNumber::Num(n) => BlockId::Number(n),
 		BlockNumber::Latest => BlockId::Latest,
 		BlockNumber::Earliest => BlockId::Earliest,
+		BlockNumber::Hash { hash, require_canonical } => {
+			// block check takes precedence over canon check.
+			match client.block_status(BlockId::Hash(hash.clone())) {
+				BlockStatus::InChain => {},
+				_ => return Err(errors::unknown_block()),
+			};
+
+			if require_canonical && !client.chain().is_canon(&hash) {
+				return Err(errors::invalid_input())
+			}
+
+			return Ok(())
+		}
 	};
 
 	match client.block_status(id) {
@@ -527,8 +549,6 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 	}
 
 	fn syncing(&self) -> Result<SyncStatus> {
-		use ethcore::snapshot::RestorationStatus;
-
 		let status = self.sync.status();
 		let client = &self.client;
 		let snapshot_status = self.snapshot.status();
@@ -539,7 +559,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 			_ => (false, None, None),
 		};
 
-		if warping || is_major_importing(Some(status.state), client.queue_info()) {
+		if warping || self.sync.is_major_syncing() {
 			let chain_info = client.chain_info();
 			let current_block = U256::from(chain_info.best_block_number);
 			let highest_block = U256::from(status.highest_block_number.unwrap_or(status.start_block_number));
@@ -559,7 +579,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 
 	fn author(&self) -> Result<H160> {
 		let miner = self.miner.authoring_params().author;
-		if miner == 0.into() {
+		if miner.is_zero() {
 			(self.accounts)()
 				.first()
 				.cloned()
@@ -615,6 +635,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 
 		let num = num.unwrap_or_default();
 		let id = match num {
+			BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 			BlockNumber::Num(n) => BlockId::Number(n),
 			BlockNumber::Earliest => BlockId::Earliest,
 			BlockNumber::Latest => BlockId::Latest,
@@ -637,8 +658,8 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 					let key2: H256 = storage_index;
 					self.client.prove_storage(key1, keccak(key2), id)
 					    .map(|(storage_proof, storage_value)| StorageProof {
-							key: key2.into(),
-							value: storage_value.into(),
+							key: key2.into_uint(),
+							value: storage_value.into_uint(),
 							proof: storage_proof.into_iter().map(Bytes::new).collect()
 						})
 					})
@@ -654,12 +675,13 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 		let num = num.unwrap_or_default();
 
 		try_bf!(check_known(&*self.client, num.clone()));
-		let res = match self.client.storage_at(&address, &H256::from(position), self.get_state(num)) {
-			Some(s) => Ok(s),
-			None => Err(errors::state_pruned()),
-		};
+		let storage = self.client.storage_at(
+			&address,
+			&BigEndianHash::from_uint(&position),
+			self.get_state(num)
+		).ok_or_else(errors::state_pruned);
 
-		Box::new(future::done(res))
+		Box::new(future::done(storage))
 	}
 
 	fn transaction_count(&self, address: H160, num: Option<BlockNumber>) -> BoxFuture<U256> {
@@ -750,8 +772,8 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 		try_bf!(check_known(&*self.client, num.clone()));
 
 		let res = match self.client.code(&address, self.get_state(num)) {
-			Some(code) => Ok(code.map_or_else(Bytes::default, Bytes::new)),
-			None => Err(errors::state_pruned()),
+			StateResult::Some(code) => Ok(code.map_or_else(Bytes::default, Bytes::new)),
+			StateResult::Missing => Err(errors::state_pruned()),
 		};
 
 		Box::new(future::done(res))
@@ -788,6 +810,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 
 	fn transaction_by_block_number_and_index(&self, num: BlockNumber, index: Index) -> BoxFuture<Option<Transaction>> {
 		let block_id = match num {
+			BlockNumber::Hash { hash, .. } => PendingOrBlock::Block(BlockId::Hash(hash)),
 			BlockNumber::Latest => PendingOrBlock::Block(BlockId::Latest),
 			BlockNumber::Earliest => PendingOrBlock::Block(BlockId::Earliest),
 			BlockNumber::Num(num) => PendingOrBlock::Block(BlockId::Number(num)),
@@ -824,6 +847,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 
 	fn uncle_by_block_number_and_index(&self, num: BlockNumber, index: Index) -> BoxFuture<Option<RichBlock>> {
 		let id = match num {
+			BlockNumber::Hash { hash, .. } => PendingUncleId { id: PendingOrBlock::Block(BlockId::Hash(hash)), position: index.value() },
 			BlockNumber::Latest => PendingUncleId { id: PendingOrBlock::Block(BlockId::Latest), position: index.value() },
 			BlockNumber::Earliest => PendingUncleId { id: PendingOrBlock::Block(BlockId::Earliest), position: index.value() },
 			BlockNumber::Num(num) => PendingUncleId { id: PendingOrBlock::Block(BlockId::Number(num)), position: index.value() },
@@ -940,12 +964,14 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 		let signed = try_bf!(fake_sign::sign_call(request));
 
 		let num = num.unwrap_or_default();
+		try_bf!(check_known(&*self.client, num.clone()));
 
 		let (mut state, header) =
 			if num == BlockNumber::Pending {
 				self.pending_state_and_header_with_fallback()
 			} else {
 				let id = match num {
+					BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 					BlockNumber::Num(num) => BlockId::Number(num),
 					BlockNumber::Earliest => BlockId::Earliest,
 					BlockNumber::Latest => BlockId::Latest,
@@ -984,6 +1010,7 @@ impl<C, SN: ?Sized, S: ?Sized, M, EM, T: StateInfo + 'static> Eth for EthClient<
 			self.pending_state_and_header_with_fallback()
 		} else {
 			let id = match num {
+				BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 				BlockNumber::Num(num) => BlockId::Number(num),
 				BlockNumber::Earliest => BlockId::Earliest,
 				BlockNumber::Latest => BlockId::Latest,

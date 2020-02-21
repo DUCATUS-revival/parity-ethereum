@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -56,6 +56,10 @@ pub trait ParitySet {
 	/// Sets the secret of engine signer account.
 	#[rpc(name = "parity_setEngineSignerSecret")]
 	fn set_engine_signer_secret(&self, _: H256) -> Result<bool>;
+
+	/// Unsets the engine signer account address.
+	#[rpc(name = "parity_clearEngineSigner")]
+	fn clear_engine_signer(&self) -> Result<bool>;
 
 	/// Sets the limits for transaction queue.
 	#[rpc(name = "parity_setTransactionsLimit")]

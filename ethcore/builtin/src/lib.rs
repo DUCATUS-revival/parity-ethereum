@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -28,15 +28,15 @@ use std::{
 };
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use common_types::errors::EthcoreError;
 use ethereum_types::{H256, U256};
-use ethjson;
-use ethkey::{Signature, recover as ec_recover};
-use eip_152::compress;
+use parity_crypto::publickey::{Signature, recover as ec_recover};
 use keccak_hash::keccak;
 use log::{warn, trace};
 use num::{BigUint, Zero, One};
 use parity_bytes::BytesRef;
 use parity_crypto::digest;
+use eip_152::compress;
 
 /// Native implementation of a built-in contract.
 pub trait Implementation: Send + Sync {
@@ -64,8 +64,8 @@ impl Pricer for Blake2FPricer {
 			return U256::zero();
 		}
 		let (rounds_bytes, _) = input.split_at(FOUR);
-		let rounds = u32::from_be_bytes(rounds_bytes.try_into().unwrap_or([0u8; 4]));
-		U256::from(*self as u64 * rounds as u64)
+		let rounds = u32::from_be_bytes(rounds_bytes.try_into().unwrap_or([0u8; FOUR]));
+		U256::from(*self as u128 * rounds as u128)
 	}
 }
 
@@ -150,7 +150,7 @@ impl Pricer for ModexpPricer {
 		// read lengths as U256 here for accurate gas calculation.
 		let mut read_len = || {
 			reader.read_exact(&mut buf[..]).expect("reading from zero-extended memory cannot fail; qed");
-			U256::from(H256::from_slice(&buf[..]))
+			U256::from_big_endian(&buf[..])
 		};
 		let base_len = read_len();
 		let exp_len = read_len();
@@ -175,7 +175,7 @@ impl Pricer for ModexpPricer {
 			let mut reader = input[(96 + base_len as usize)..].chain(io::repeat(0));
 			let len = min(exp_len, 32) as usize;
 			reader.read_exact(&mut buf[(32 - len)..]).expect("reading from zero-extended memory cannot fail; qed");
-			U256::from(H256::from_slice(&buf[..]))
+			U256::from_big_endian(&buf[..])
 		};
 
 		let adjusted_exp_len = Self::adjusted_exp_len(exp_len, exp_low);
@@ -248,7 +248,7 @@ impl Builtin {
 }
 
 impl TryFrom<ethjson::spec::builtin::Builtin> for Builtin {
-	type Error = String;
+	type Error = EthcoreError;
 
 	fn try_from(b: ethjson::spec::builtin::Builtin) -> Result<Self, Self::Error> {
 		let native = EthereumBuiltin::from_str(&b.name)?;
@@ -324,7 +324,7 @@ enum EthereumBuiltin {
 }
 
 impl FromStr for EthereumBuiltin {
-	type Err = String;
+	type Err = EthcoreError;
 
 	fn from_str(name: &str) -> Result<EthereumBuiltin, Self::Err> {
 		match name {
@@ -337,7 +337,7 @@ impl FromStr for EthereumBuiltin {
 			"alt_bn128_mul" => Ok(EthereumBuiltin::Bn128Mul(Bn128Mul)),
 			"alt_bn128_pairing" => Ok(EthereumBuiltin::Bn128Pairing(Bn128Pairing)),
 			"blake2_f" => Ok(EthereumBuiltin::Blake2F(Blake2F)),
-			_ => return Err(format!("invalid builtin name: {}", name)),
+			_ => return Err(EthcoreError::Msg(format!("invalid builtin name: {}", name))),
 		}
 	}
 }
@@ -359,30 +359,39 @@ impl Implementation for EthereumBuiltin {
 }
 
 #[derive(Debug)]
+/// The identity builtin
 pub struct Identity;
 
 #[derive(Debug)]
+/// The EC Recover builtin
 pub struct EcRecover;
 
 #[derive(Debug)]
+/// The Sha256 builtin
 pub struct Sha256;
 
 #[derive(Debug)]
+/// The Ripemd160 builtin
 pub struct Ripemd160;
 
 #[derive(Debug)]
+/// The Modexp builtin
 pub struct Modexp;
 
 #[derive(Debug)]
+/// The Bn128Add builtin
 pub struct Bn128Add;
 
 #[derive(Debug)]
+/// The Bn128Mul builtin
 pub struct Bn128Mul;
 
 #[derive(Debug)]
+/// The Bn128Pairing builtin
 pub struct Bn128Pairing;
 
 #[derive(Debug)]
+/// The Blake2F builtin
 pub struct Blake2F;
 
 impl Implementation for Identity {
@@ -414,7 +423,7 @@ impl Implementation for EcRecover {
 			if let Ok(p) = ec_recover(&s, &hash) {
 				let r = keccak(p);
 				output.write(0, &[0; 12]);
-				output.write(12, &r[12..r.len()]);
+				output.write(12, &r.as_bytes()[12..]);
 			}
 		}
 
@@ -439,7 +448,7 @@ impl Implementation for Blake2F {
 
 		if input.len() != BLAKE2_F_ARG_LEN {
 			trace!(target: "builtin", "input length for Blake2 F precompile should be exactly 213 bytes, was {}", input.len());
-			return Err("input length for Blake2 F precompile should be exactly 213 bytes".into())
+			return Err("input length for Blake2 F precompile should be exactly 213 bytes")
 		}
 
 		let mut cursor = Cursor::new(input);
@@ -469,7 +478,7 @@ impl Implementation for Blake2F {
 				Some(0) => false,
 				_ => {
 					trace!(target: "builtin", "incorrect final block indicator flag, was: {:?}", input.last());
-					return Err("incorrect final block indicator flag".into())
+					return Err("incorrect final block indicator flag")
 				}
 			};
 
@@ -669,7 +678,7 @@ impl Implementation for Bn128Pairing {
 	///     - any of even points does not belong to the twisted bn128 curve over the field F_p^2 = F_p[i] / (i^2 + 1)
 	fn execute(&self, input: &[u8], output: &mut BytesRef) -> Result<(), &'static str> {
 		if input.len() % 192 != 0 {
-			return Err("Invalid input length, must be multiple of 192 (3 * (32*2))".into())
+			return Err("Invalid input length, must be multiple of 192 (3 * (32*2))")
 		}
 
 		if let Err(err) = self.execute_with_error(input, output) {
@@ -682,7 +691,7 @@ impl Implementation for Bn128Pairing {
 
 impl Bn128Pairing {
 	fn execute_with_error(&self, input: &[u8], output: &mut BytesRef) -> Result<(), &'static str> {
-		use bn::{AffineG1, AffineG2, Fq, Fq2, pairing, G1, G2, Gt, Group};
+		use bn::{AffineG1, AffineG2, Fq, Fq2, pairing_batch, G1, G2, Gt, Group};
 
 		let ret_val = if input.is_empty() {
 			U256::one()
@@ -724,7 +733,7 @@ impl Bn128Pairing {
 				vals.push((a, b));
 			};
 
-			let mul = vals.into_iter().fold(Gt::one(), |s, (a, b)| s * pairing(a, b));
+			let mul = pairing_batch(&vals);
 
 			if mul == Gt::one() {
 				U256::one()
@@ -1188,6 +1197,7 @@ mod tests {
 
 	#[test]
 	fn bn128_mul() {
+
 		let f = Builtin {
 			pricer: map![0 => Pricing::Linear(Linear { base: 0, word: 0 })],
 			native: EthereumBuiltin::from_str("alt_bn128_mul").unwrap(),
@@ -1505,6 +1515,6 @@ mod tests {
 		}).unwrap();
 
 		assert_eq!(b.cost(&[0; 1], 0), U256::from(0), "not activated yet");
-		assert_eq!(b.cost(&[0; 1], 1), U256::from(1_337));
+		assert_eq!(b.cost(&[0; 1], 1), U256::from(1_337), "use price #3");
 	}
 }

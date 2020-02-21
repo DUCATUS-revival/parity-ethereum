@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -39,7 +39,12 @@ pub trait Signer {
 
 	/// Confirm specific request with token.
 	#[rpc(name = "signer_confirmRequestWithToken")]
-	fn confirm_request_with_token(&self, _: U256, _: TransactionModification, _: String) -> BoxFuture<ConfirmationResponseWithToken>;
+	fn confirm_request_with_token(
+		&self,
+		_: U256,
+		_: TransactionModification,
+		_: String
+	) -> BoxFuture<ConfirmationResponseWithToken>;
 
 	/// Confirm specific request with already signed data.
 	#[rpc(name = "signer_confirmRequestRaw")]

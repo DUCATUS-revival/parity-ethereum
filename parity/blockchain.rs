@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -26,17 +26,14 @@ use hash::{keccak, KECCAK_NULL_RLP};
 use ethereum_types::{U256, H256, Address};
 use bytes::ToPretty;
 use rlp::PayloadInfo;
-use ethcore::client::{
-	Mode, DatabaseCompactionProfile, VMType, Nonce, Balance, BlockChainClient, BlockId, BlockInfo, ImportBlock, BlockChainReset, ImportExportBlocks
+use client_traits::{BlockChainReset, Nonce, Balance, BlockChainClient, ImportExportBlocks};
+use ethcore::{
+	client::{DatabaseCompactionProfile},
+	miner::Miner,
 };
-use types::data_format::DataFormat;
-use ethcore::error::{ImportErrorKind, ErrorKind as EthcoreErrorKind, Error as EthcoreError};
-use ethcore::miner::Miner;
-use ethcore::verification::queue::VerifierSettings;
-use ethcore::verification::queue::kind::blocks::Unverified;
 use ethcore_service::ClientService;
 use cache::CacheConfig;
-use informant::{Informant, FullNodeInformantData, MillisecondDuration};
+use informant::{Informant, FullNodeInformantData};
 use params::{SpecType, Pruning, Switch, tracing_switch_to_bool, fatdb_switch_to_bool};
 use helpers::{to_client_config, execute_upgrades};
 use dir::Directories;
@@ -44,6 +41,13 @@ use user_defaults::UserDefaults;
 use ethcore_private_tx;
 use db;
 use ansi_term::Colour;
+use types::{
+	ids::BlockId,
+	errors::{ImportError, EthcoreError},
+	client_types::{Mode, StateResult},
+};
+use types::data_format::DataFormat;
+use verification::queue::VerifierSettings;
 
 #[derive(Debug, PartialEq)]
 pub enum BlockchainCmd {
@@ -88,7 +92,6 @@ pub struct ImportBlockchain {
 	pub compaction: DatabaseCompactionProfile,
 	pub tracing: Switch,
 	pub fat_db: Switch,
-	pub vm_type: VMType,
 	pub check_seal: bool,
 	pub with_color: bool,
 	pub verifier_settings: VerifierSettings,
@@ -202,9 +205,11 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 	config.queue.verifier_settings = cmd.verifier_settings;
 
 	// initialize database.
-	let db = db::open_db(&client_path.to_str().expect("DB path could not be converted to string."),
-						 &cmd.cache_config,
-						 &cmd.compaction).map_err(|e| format!("Failed to open database: {:?}", e))?;
+	let db = db::open_db_light(
+		&client_path.to_str().expect("DB path could not be converted to string."),
+		&cmd.cache_config,
+		&cmd.compaction,
+	).map_err(|e| format!("Failed to open database: {:?}", e))?;
 
 	// TODO: could epoch signals be available at the end of the file?
 	let fetch = ::light::client::fetch::unavailable();
@@ -250,7 +255,7 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 		}
 
 		match client.import_header(header) {
-			Err(EthcoreError(EthcoreErrorKind::Import(ImportErrorKind::AlreadyInChain), _)) => {
+			Err(EthcoreError::Import(ImportError::AlreadyInChain)) => {
 				trace!("Skipping block already in chain.");
 			}
 			Err(e) => {
@@ -290,13 +295,13 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 	}
 	client.flush_queue();
 
-	let ms = timer.elapsed().as_milliseconds();
+	let elapsed = timer.elapsed();
 	let report = client.report();
 
 	info!("Import completed in {} seconds, {} headers, {} hdr/s",
-		ms / 1000,
+		elapsed.as_secs(),
 		report.blocks_imported,
-		(report.blocks_imported * 1000) as u64 / ms,
+		(report.blocks_imported as u128 * 1000) / elapsed.as_millis(),
 	);
 
 	Ok(())
@@ -347,7 +352,6 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 		tracing,
 		fat_db,
 		cmd.compaction,
-		cmd.vm_type,
 		"".into(),
 		algorithm,
 		cmd.pruning_history,
@@ -411,16 +415,16 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 	user_defaults.save(&user_defaults_path)?;
 
 	let report = client.report();
-
-	let ms = timer.elapsed().as_milliseconds();
+	let elapsed = timer.elapsed();
+	let ms = timer.elapsed().as_millis();
 	info!("Import completed in {} seconds, {} blocks, {} blk/s, {} transactions, {} tx/s, {} Mgas, {} Mgas/s",
-		ms / 1000,
+		elapsed.as_secs(),
 		report.blocks_imported,
-		(report.blocks_imported * 1000) as u64 / ms,
+		(report.blocks_imported as u128 * 1000) / ms,
 		report.transactions_applied,
-		(report.transactions_applied * 1000) as u64 / ms,
+		(report.transactions_applied as u128 * 1000) / ms,
 		report.gas_processed / 1_000_000,
-		(report.gas_processed / (ms * 1000)).low_u64(),
+		report.gas_processed / (ms * 1000),
 	);
 	Ok(())
 }
@@ -484,7 +488,6 @@ fn start_client(
 		tracing,
 		fat_db,
 		compaction,
-		VMType::default(),
 		"".into(),
 		algorithm,
 		pruning_history,
@@ -588,7 +591,10 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 				out.write(b",").expect("Write error");
 			}
 			out.write_fmt(format_args!("\n\"0x{:x}\": {{\"balance\": \"{:x}\", \"nonce\": \"{:x}\"", account, balance, client.nonce(&account, at).unwrap_or_else(U256::zero))).expect("Write error");
-			let code = client.code(&account, at.into()).unwrap_or(None).unwrap_or_else(Vec::new);
+			let code = match client.code(&account, at.into()) {
+				StateResult::Missing => Vec::new(),
+				StateResult::Some(t) => t.unwrap_or_else(Vec::new),
+			};
 			if !code.is_empty() {
 				out.write_fmt(format_args!(", \"code_hash\": \"0x{:x}\"", keccak(&code))).expect("Write error");
 				if cmd.code {
@@ -602,7 +608,7 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 					out.write_fmt(format_args!(", \"storage\": {{")).expect("Write error");
 					let mut last_storage: Option<H256> = None;
 					loop {
-						let keys = client.list_storage(at, &account, last_storage.as_ref(), 1000).ok_or("Specified block not found")?;
+						let keys = client.list_storage(at, &account, last_storage.as_ref(), Some(1000)).ok_or("Specified block not found")?;
 						if keys.is_empty() {
 							break;
 						}

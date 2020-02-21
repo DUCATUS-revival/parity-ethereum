@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -17,11 +17,12 @@
 use std::sync::Arc;
 use std::collections::{BTreeSet, BTreeMap};
 use ethereum_types::{Address, H256};
-use ethkey::Secret;
-use parking_lot::{Mutex, Condvar};
+use crypto::publickey::Secret;
+use futures::Oneshot;
+use parking_lot::Mutex;
 use key_server_cluster::{Error, SessionId, NodeId, DocumentKeyShare};
 use key_server_cluster::cluster::Cluster;
-use key_server_cluster::cluster_sessions::{SessionIdWithSubSession, ClusterSession};
+use key_server_cluster::cluster_sessions::{SessionIdWithSubSession, ClusterSession, CompletionSignal};
 use key_server_cluster::decryption_session::SessionImpl as DecryptionSession;
 use key_server_cluster::signing_session_ecdsa::SessionImpl as EcdsaSigningSession;
 use key_server_cluster::signing_session_schnorr::SessionImpl as SchnorrSigningSession;
@@ -82,13 +83,13 @@ struct SessionCore<T: SessionTransport> {
 	/// Key share.
 	pub key_share: Option<DocumentKeyShare>,
 	/// Session result computer.
-	pub result_computer: Arc<SessionResultComputer>,
+	pub result_computer: Arc<dyn SessionResultComputer>,
 	/// Session transport.
 	pub transport: T,
 	/// Session nonce.
 	pub nonce: u64,
-	/// SessionImpl completion condvar.
-	pub completed: Condvar,
+	/// Session completion signal.
+	pub completed: CompletionSignal<Option<(H256, NodeId)>>,
 }
 
 /// Mutable session data.
@@ -118,7 +119,7 @@ pub struct SessionParams<T: SessionTransport> {
 	/// Key share.
 	pub key_share: Option<DocumentKeyShare>,
 	/// Session result computer.
-	pub result_computer: Arc<SessionResultComputer>,
+	pub result_computer: Arc<dyn SessionResultComputer>,
 	/// Session transport to communicate to other cluster nodes.
 	pub transport: T,
 	/// Session nonce.
@@ -139,7 +140,7 @@ enum SessionState {
 /// Isolated session transport.
 pub struct IsolatedSessionTransport {
 	/// Cluster.
-	pub cluster: Arc<Cluster>,
+	pub cluster: Arc<dyn Cluster>,
 	/// Key id.
 	pub key_id: SessionId,
 	/// Sub session id.
@@ -166,8 +167,9 @@ pub struct LargestSupportResultComputer;
 
 impl<T> SessionImpl<T> where T: SessionTransport {
 	/// Create new session.
-	pub fn new(params: SessionParams<T>) -> Self {
-		SessionImpl {
+	pub fn new(params: SessionParams<T>) -> (Self, Oneshot<Result<Option<(H256, NodeId)>, Error>>) {
+		let (completed, oneshot) = CompletionSignal::new();
+		(SessionImpl {
 			core: SessionCore {
 				meta: params.meta,
 				sub_session: params.sub_session,
@@ -175,7 +177,7 @@ impl<T> SessionImpl<T> where T: SessionTransport {
 				result_computer: params.result_computer,
 				transport: params.transport,
 				nonce: params.nonce,
-				completed: Condvar::new(),
+				completed,
 			},
 			data: Mutex::new(SessionData {
 				state: SessionState::WaitingForInitialization,
@@ -191,7 +193,7 @@ impl<T> SessionImpl<T> where T: SessionTransport {
 				continue_with: None,
 				failed_continue_with: None,
 			})
-		}
+		}, oneshot)
 	}
 
 	/// Return session meta.
@@ -221,10 +223,9 @@ impl<T> SessionImpl<T> where T: SessionTransport {
 		self.data.lock().failed_continue_with.take()
 	}
 
-	/// Wait for session completion.
-	pub fn wait(&self) -> Result<Option<(H256, NodeId)>, Error> {
-		Self::wait_session(&self.core.completed, &self.data, None, |data| data.result.clone())
-			.expect("wait_session returns Some if called without timeout; qed")
+	/// Return session completion result (if available).
+	pub fn result(&self) -> Option<Result<Option<(H256, NodeId)>, Error>> {
+		self.data.lock().result.clone()
 	}
 
 	/// Retrieve common key data (author, threshold, public), if available.
@@ -344,7 +345,7 @@ impl<T> SessionImpl<T> where T: SessionTransport {
 		// update state
 		data.state = SessionState::Finished;
 		data.result = Some(Ok(None));
-		self.core.completed.notify_all();
+		self.core.completed.send(Ok(None));
 
 		Ok(())
 	}
@@ -378,8 +379,8 @@ impl<T> SessionImpl<T> where T: SessionTransport {
 					let prev_key_share = data.key_share.as_ref()
 						.expect("data.key_share.is_none() is matched by previous branch; qed");
 					if prev_key_share.threshold != key_common.threshold ||
-						prev_key_share.author[..] != key_common.author[..] ||
-						prev_key_share.public[..] != key_common.public[..]
+						prev_key_share.author.as_bytes() != key_common.author.as_bytes() ||
+						prev_key_share.public.as_bytes() != key_common.public.as_bytes()
 					{
 						return Err(Error::InvalidMessage);
 					}
@@ -450,15 +451,18 @@ impl<T> SessionImpl<T> where T: SessionTransport {
 				}
 			}
 
+			let result = result.map(Some);
 			data.state = SessionState::Finished;
-			data.result = Some(result.map(Some));
-			core.completed.notify_all();
+			data.result = Some(result.clone());
+			core.completed.send(result);
 		}
 	}
 }
 
 impl<T> ClusterSession for SessionImpl<T> where T: SessionTransport {
 	type Id = SessionIdWithSubSession;
+	type CreationData = ();
+	type SuccessfulResult = Option<(H256, NodeId)>;
 
 	fn type_name() -> &'static str {
 		"version negotiation"
@@ -482,7 +486,7 @@ impl<T> ClusterSession for SessionImpl<T> where T: SessionTransport {
 				warn!(target: "secretstore_net", "{}: key version negotiation session failed with timeout", self.core.meta.self_node_id);
 
 				data.result = Some(Err(Error::ConsensusTemporaryUnreachable));
-				self.core.completed.notify_all();
+				self.core.completed.send(Err(Error::ConsensusTemporaryUnreachable));
 			}
 		}
 	}
@@ -510,8 +514,8 @@ impl<T> ClusterSession for SessionImpl<T> where T: SessionTransport {
 			self.core.meta.self_node_id, error, node);
 
 		data.state = SessionState::Finished;
-		data.result = Some(Err(error));
-		self.core.completed.notify_all();
+		data.result = Some(Err(error.clone()));
+		self.core.completed.send(Err(error));
 	}
 
 	fn on_message(&self, sender: &NodeId, message: &Message) -> Result<(), Error> {
@@ -613,7 +617,7 @@ mod tests {
 	use std::sync::Arc;
 	use std::collections::{VecDeque, BTreeMap, BTreeSet};
 	use ethereum_types::{H512, H160, Address};
-	use ethkey::public_to_address;
+	use crypto::publickey::public_to_address;
 	use key_server_cluster::{NodeId, SessionId, Error, KeyStorage, DummyKeyStorage,
 		DocumentKeyShare, DocumentKeyShareVersion};
 	use key_server_cluster::math;
@@ -698,7 +702,7 @@ mod tests {
 								cluster: cluster,
 							},
 							nonce: 0,
-						}),
+						}).0,
 					})
 				}).collect(),
 				queue: VecDeque::new(),
@@ -855,7 +859,7 @@ mod tests {
 				versions: vec![version_id.clone().into()]
 			})), Err(Error::InvalidMessage));
 		}
-		
+
 		run_test(CommonKeyData {
 			threshold: 2,
 			author: Default::default(),
@@ -864,13 +868,13 @@ mod tests {
 
 		run_test(CommonKeyData {
 			threshold: 1,
-			author: H160::from(1).into(),
+			author: H160::from_low_u64_be(1).into(),
 			public: Default::default(),
 		});
 
 		run_test(CommonKeyData {
 			threshold: 1,
-			author: H160::from(2).into(),
+			author: H160::from_low_u64_be(2).into(),
 			public: Default::default(),
 		});
 	}
@@ -895,9 +899,9 @@ mod tests {
 		let nodes = MessageLoop::prepare_nodes(2);
 		let version_id = (*math::generate_random_scalar().unwrap()).clone();
 		nodes.values().nth(0).unwrap().insert(Default::default(), DocumentKeyShare {
-			author: H160::from(2),
+			author: H160::from_low_u64_be(2),
 			threshold: 1,
-			public: H512::from(3),
+			public: H512::from_low_u64_be(3),
 			common_point: None,
 			encrypted_point: None,
 			versions: vec![DocumentKeyShareVersion {
@@ -913,9 +917,9 @@ mod tests {
 
 		// check that upon completion, commmon key data is known
 		assert_eq!(ml.session(0).common_key_data(), Ok(DocumentKeyShare {
-			author: H160::from(2),
+			author: H160::from_low_u64_be(2),
 			threshold: 1,
-			public: H512::from(3),
+			public: H512::from_low_u64_be(3),
 			..Default::default()
 		}));
 	}
@@ -951,7 +955,7 @@ mod tests {
 	#[test]
 	fn fatal_error_is_broadcasted_if_started_with_origin() {
 		let mut ml = MessageLoop::empty(3);
-		ml.session(0).set_continue_action(ContinueAction::Decrypt(create_default_decryption_session(), Some(1.into()), true, true));
+		ml.session(0).set_continue_action(ContinueAction::Decrypt(create_default_decryption_session(), Some(Address::from_low_u64_be(1)), true, true));
 		ml.session(0).initialize(ml.nodes.keys().cloned().collect()).unwrap();
 		ml.run();
 
@@ -960,6 +964,6 @@ mod tests {
 
 		// slave nodes have non-empty failed continue action
 		assert!(ml.nodes.values().skip(1).all(|n| n.session.take_failed_continue_action()
-			== Some(FailedContinueAction::Decrypt(Some(1.into()), public_to_address(&2.into())))));
+			== Some(FailedContinueAction::Decrypt(Some(Address::from_low_u64_be(1)), public_to_address(&H512::from_low_u64_be(2))))));
 	}
 }

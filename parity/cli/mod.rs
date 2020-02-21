@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -296,11 +296,11 @@ usage! {
 
 			ARG arg_release_track: (String) = "current", or |c: &Config| c.parity.as_ref()?.release_track.clone(),
 			"--release-track=[TRACK]",
-			"Set which release track we should use for updates. TRACK can be one of: stable - Stable releases; beta - Beta releases; nightly - Nightly releases (unstable); testing - Testing releases (do not use); current - Whatever track this executable was released on.",
+			"Set which release track we should use for updates. TRACK can be one of: stable - Stable releases; nightly - Nightly releases (unstable); testing - Testing releases (do not use); current - Whatever track this executable was released on.",
 
 			ARG arg_chain: (String) = "foundation", or |c: &Config| c.parity.as_ref()?.chain.clone(),
 			"--chain=[CHAIN]",
-			"Specify the blockchain type. CHAIN may be either a JSON chain specification file or ethereum, classic, poacore, xdai, volta, ewc, musicoin, ellaism, mix, callisto, morden, mordor, ropsten, kovan, rinkeby, goerli, kotti, poasokol, testnet, or dev.",
+			"Specify the blockchain type. CHAIN may be either a JSON chain specification file or ethereum, classic, poacore, xdai, volta, ewc, musicoin, ellaism, mix, callisto, ethercore, morden, mordor, ropsten, kovan, rinkeby, goerli, kotti, poasokol, testnet, evantestcore, evancore or dev.",
 
 			ARG arg_keys_path: (String) = "$BASE/keys", or |c: &Config| c.parity.as_ref()?.keys_path.clone(),
 			"--keys-path=[PATH]",
@@ -332,10 +332,6 @@ usage! {
 			"Add SHIFT to all port numbers Parity is listening on. Includes network port and all servers (HTTP JSON-RPC, WebSockets JSON-RPC, IPFS, SecretStore).",
 
 		["Account Options"]
-			FLAG flag_no_hardware_wallets: (bool) = false, or |c: &Config| c.account.as_ref()?.disable_hardware.clone(),
-			"--no-hardware-wallets",
-			"Disables hardware wallet support.",
-
 			FLAG flag_fast_unlock: (bool) = false, or |c: &Config| c.account.as_ref()?.fast_unlock.clone(),
 			"--fast-unlock",
 			"Use drastically faster unlocking mode. This setting causes raw secrets to be stored unprotected in memory, so use with care.",
@@ -352,6 +348,10 @@ usage! {
 			"--unlock=[ACCOUNTS]",
 			"Unlock ACCOUNTS for the duration of the execution. ACCOUNTS is a comma-delimited list of addresses.",
 
+			ARG arg_enable_signing_queue: (bool) = false, or |c: &Config| c.account.as_ref()?.enable_signing_queue,
+			"--enable-signing-queue=[BOOLEAN]",
+			"Enables the signing queue for external transaction signing either via CLI or personal_unlockAccount, turned off by default.",
+
 			ARG arg_password: (Vec<String>) = Vec::new(), or |c: &Config| c.account.as_ref()?.password.clone(),
 			"--password=[FILE]...",
 			"Provide a file containing a password for unlocking an account. Leading and trailing whitespace is trimmed.",
@@ -360,6 +360,10 @@ usage! {
 			FLAG flag_private_enabled: (bool) = false, or |c: &Config| c.private_tx.as_ref()?.enabled,
 			"--private-tx-enabled",
 			"Enable private transactions.",
+
+			FLAG flag_private_state_offchain: (bool) = false, or |c: &Config| c.private_tx.as_ref()?.state_offchain,
+			"--private-state-offchain",
+			"Store private state offchain (in the local DB).",
 
 			ARG arg_private_signer: (Option<String>) = None, or |c: &Config| c.private_tx.as_ref()?.signer.clone(),
 			"--private-signer=[ACCOUNT]",
@@ -498,25 +502,25 @@ usage! {
 			"--jsonrpc-interface=[IP]",
 			"Specify the hostname portion of the HTTP JSON-RPC API server, IP should be an interface's IP address, or all (all interfaces) or local.",
 
-			ARG arg_jsonrpc_apis: (String) = "web3,eth,pubsub,net,parity,private,parity_pubsub,traces,rpc,shh,shh_pubsub", or |c: &Config| c.rpc.as_ref()?.apis.as_ref().map(|vec| vec.join(",")),
+			ARG arg_jsonrpc_apis: (String) = "web3,eth,pubsub,net,parity,private,parity_pubsub,traces,rpc,parity_transactions_pool", or |c: &Config| c.rpc.as_ref()?.apis.as_ref().map(|vec| vec.join(",")),
 			"--jsonrpc-apis=[APIS]",
-			"Specify the APIs available through the HTTP JSON-RPC interface using a comma-delimited list of API names. Possible names are: all, safe, debug, web3, net, eth, pubsub, personal, signer, parity, parity_pubsub, parity_accounts, parity_set, traces, rpc, secretstore, shh, shh_pubsub. You can also disable a specific API by putting '-' in the front, example: all,-personal. 'safe' enables the following APIs: web3, net, eth, pubsub, parity, parity_pubsub, traces, rpc, shh, shh_pubsub",
+			"Specify the APIs available through the HTTP JSON-RPC interface using a comma-delimited list of API names. Possible names are: all, safe, debug, web3, net, eth, pubsub, personal, signer, parity, parity_pubsub, parity_accounts, parity_set, traces, rpc, secretstore. You can also disable a specific API by putting '-' in the front, example: all,-personal. 'safe' enables the following APIs: web3, net, eth, pubsub, parity, parity_pubsub, traces, rpc",
 
 			ARG arg_jsonrpc_hosts: (String) = "none", or |c: &Config| c.rpc.as_ref()?.hosts.as_ref().map(|vec| vec.join(",")),
 			"--jsonrpc-hosts=[HOSTS]",
 			"List of allowed Host header values. This option will validate the Host header sent by the browser, it is additional security against some attack vectors. Special options: \"all\", \"none\",.",
 
-			ARG arg_jsonrpc_threads: (usize) = 4usize, or |c: &Config| c.rpc.as_ref()?.processing_threads,
-			"--jsonrpc-threads=[THREADS]",
-			"Turn on additional processing threads for JSON-RPC servers (all transports). Setting this to a non-zero value allows parallel execution of cpu-heavy queries.",
+			ARG arg_jsonrpc_threads: (Option<usize>) = None, or |_| None,
+			"--jsonrpc-threads=[NUM]",
+			"DEPRECATED, DOES NOTHING",
+
+			ARG arg_jsonrpc_server_threads: (Option<usize>) = Some(4), or |c: &Config| c.rpc.as_ref()?.server_threads,
+			"--jsonrpc-server-threads=[NUM]",
+			"Enables multiple threads handling incoming connections for HTTP JSON-RPC server.",
 
 			ARG arg_jsonrpc_cors: (String) = "none", or |c: &Config| c.rpc.as_ref()?.cors.as_ref().map(|vec| vec.join(",")),
 			"--jsonrpc-cors=[URL]",
 			"Specify CORS header for HTTP JSON-RPC API responses. Special options: \"all\", \"none\".",
-
-			ARG arg_jsonrpc_server_threads: (Option<usize>) = None, or |c: &Config| c.rpc.as_ref()?.server_threads,
-			"--jsonrpc-server-threads=[NUM]",
-			"Enables multiple threads handling incoming connections for HTTP JSON-RPC server.",
 
 			ARG arg_jsonrpc_max_payload: (Option<usize>) = None, or |c: &Config| c.rpc.as_ref()?.max_payload,
 			"--jsonrpc-max-payload=[MB]",
@@ -539,9 +543,9 @@ usage! {
 			"--ws-interface=[IP]",
 			"Specify the hostname portion of the WebSockets JSON-RPC server, IP should be an interface's IP address, or all (all interfaces) or local.",
 
-			ARG arg_ws_apis: (String) = "web3,eth,pubsub,net,parity,parity_pubsub,private,traces,rpc,shh,shh_pubsub", or |c: &Config| c.websockets.as_ref()?.apis.as_ref().map(|vec| vec.join(",")),
+			ARG arg_ws_apis: (String) = "web3,eth,pubsub,net,parity,parity_pubsub,private,traces,rpc,parity_transactions_pool", or |c: &Config| c.websockets.as_ref()?.apis.as_ref().map(|vec| vec.join(",")),
 			"--ws-apis=[APIS]",
-			"Specify the JSON-RPC APIs available through the WebSockets interface using a comma-delimited list of API names. Possible names are: all, safe, web3, net, eth, pubsub, personal, signer, parity, parity_pubsub, parity_accounts, parity_set, traces, rpc, secretstore, shh, shh_pubsub. You can also disable a specific API by putting '-' in the front, example: all,-personal. 'safe' enables the following APIs: web3, net, eth, pubsub, parity, parity_pubsub, traces, rpc, shh, shh_pubsub",
+			"Specify the JSON-RPC APIs available through the WebSockets interface using a comma-delimited list of API names. Possible names are: all, safe, web3, net, eth, pubsub, personal, signer, parity, parity_pubsub, parity_accounts, parity_set, traces, rpc, secretstore. You can also disable a specific API by putting '-' in the front, example: all,-personal. 'safe' enables the following APIs: web3, net, eth, pubsub, parity, parity_pubsub, traces, rpc",
 
 			ARG arg_ws_origins: (String) = "parity://*,chrome-extension://*,moz-extension://*", or |c: &Config| c.websockets.as_ref()?.origins.as_ref().map(|vec| vec.join(",")),
 			"--ws-origins=[URL]",
@@ -564,9 +568,13 @@ usage! {
 			"--ipc-path=[PATH]",
 			"Specify custom path for JSON-RPC over IPC service.",
 
-			ARG arg_ipc_apis: (String) = "web3,eth,pubsub,net,parity,parity_pubsub,parity_accounts,private,traces,rpc,shh,shh_pubsub", or |c: &Config| c.ipc.as_ref()?.apis.as_ref().map(|vec| vec.join(",")),
+			ARG arg_ipc_chmod: (String) = "660", or |c: &Config| c.ipc.as_ref()?.chmod.clone(),
+			"--ipc-chmod=[NUM]",
+			"Specify octal value for ipc socket permissions (unix/bsd only)",
+
+			ARG arg_ipc_apis: (String) = "web3,eth,pubsub,net,parity,parity_pubsub,parity_accounts,private,traces,rpc,parity_transactions_pool", or |c: &Config| c.ipc.as_ref()?.apis.as_ref().map(|vec| vec.join(",")),
 			"--ipc-apis=[APIS]",
-			"Specify custom API set available via JSON-RPC over IPC using a comma-delimited list of API names. Possible names are: all, safe, web3, net, eth, pubsub, personal, signer, parity, parity_pubsub, parity_accounts, parity_set, traces, rpc, secretstore, shh, shh_pubsub. You can also disable a specific API by putting '-' in the front, example: all,-personal. 'safe' enables the following APIs: web3, net, eth, pubsub, parity, parity_pubsub, traces, rpc, shh, shh_pubsub",
+			"Specify custom API set available via JSON-RPC over IPC using a comma-delimited list of API names. Possible names are: all, safe, web3, net, eth, pubsub, personal, signer, parity, parity_pubsub, parity_accounts, parity_set, traces, rpc, secretstore. You can also disable a specific API by putting '-' in the front, example: all,-personal. 'safe' enables the following APIs: web3, net, eth, pubsub, parity, parity_pubsub, traces, rpc",
 
 		["API and Console Options – IPFS"]
 			FLAG flag_ipfs_api: (bool) = false, or |c: &Config| c.ipfs.as_ref()?.enable.clone(),
@@ -622,6 +630,10 @@ usage! {
 			FLAG flag_no_secretstore_auto_migrate: (bool) = false, or |c: &Config| c.secretstore.as_ref()?.disable_auto_migrate.clone(),
 			"--no-secretstore-auto-migrate",
 			"Do not run servers set change session automatically when servers set changes. This option has no effect when servers set is read from configuration file.",
+
+			ARG arg_secretstore_http_cors: (String) = "none", or |c: &Config| c.secretstore.as_ref()?.cors.as_ref().map(|vec| vec.join(",")),
+			"--secretstore-http-cors=[URL]",
+			"Specify CORS header for Secret Store HTTP API responses. Special options: \"all\", \"none\".",
 
 			ARG arg_secretstore_acl_contract: (Option<String>) = Some("registry".into()), or |c: &Config| c.secretstore.as_ref()?.acl_contract.clone(),
 			"--secretstore-acl-contract=[SOURCE]",
@@ -716,7 +728,9 @@ usage! {
 			"--no-persistent-txqueue",
 			"Don't save pending local transactions to disk to be restored whenever the node restarts.",
 
-			FLAG flag_stratum: (bool) = false, or |c: &Config| Some(c.stratum.is_some()),
+			// For backward compatibility; Stratum should be enabled if the config file
+			// contains a `[stratum]` section and it is not explicitly disabled (disable = true)
+			FLAG flag_stratum: (bool) = false, or |c: &Config| Some(c.stratum.as_ref().map(|s| s.disable != Some(true)).unwrap_or(false)),
 			"--stratum",
 			"Run Stratum server for miner push notification.",
 
@@ -924,11 +938,11 @@ usage! {
 		["Whisper Options"]
 			FLAG flag_whisper: (bool) = false, or |c: &Config| c.whisper.as_ref()?.enabled,
 			"--whisper",
-			"Enable the Whisper network.",
+			"Does nothing. Whisper has been moved to https://github.com/paritytech/whisper",
 
-			ARG arg_whisper_pool_size: (usize) = 10usize, or |c: &Config| c.whisper.as_ref()?.pool_size.clone(),
+			ARG arg_whisper_pool_size: (Option<usize>) = None, or |c: &Config| c.whisper.as_ref()?.pool_size.clone(),
 			"--whisper-pool-size=[MB]",
-			"Target size of the whisper message pool in megabytes.",
+			"Does nothing. Whisper has been moved to https://github.com/paritytech/whisper",
 
 		["Legacy Options"]
 			// Options that are hidden from config, but are still unique for its functionality.
@@ -1188,10 +1202,10 @@ struct Operating {
 #[serde(deny_unknown_fields)]
 struct Account {
 	unlock: Option<Vec<String>>,
+	enable_signing_queue: Option<bool>,
 	password: Option<Vec<String>>,
 	keys_iterations: Option<u32>,
 	refresh_time: Option<u64>,
-	disable_hardware: Option<bool>,
 	fast_unlock: Option<bool>,
 }
 
@@ -1199,6 +1213,7 @@ struct Account {
 #[serde(deny_unknown_fields)]
 struct PrivateTransactions {
 	enabled: Option<bool>,
+	state_offchain: Option<bool>,
 	signer: Option<String>,
 	validators: Option<Vec<String>>,
 	account: Option<String>,
@@ -1256,7 +1271,6 @@ struct Rpc {
 	apis: Option<Vec<String>>,
 	hosts: Option<Vec<String>>,
 	server_threads: Option<usize>,
-	processing_threads: Option<usize>,
 	max_payload: Option<usize>,
 	keep_alive: Option<bool>,
 	experimental_rpcs: Option<bool>,
@@ -1279,6 +1293,7 @@ struct Ws {
 #[derive(Default, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Ipc {
+	chmod: Option<String>,
 	disable: Option<bool>,
 	path: Option<String>,
 	apis: Option<Vec<String>>,
@@ -1326,6 +1341,7 @@ struct SecretStore {
 	http_interface: Option<String>,
 	http_port: Option<u16>,
 	path: Option<String>,
+	cors: Option<Vec<String>>
 }
 
 #[derive(Default, Debug, PartialEq, Deserialize)]
@@ -1379,6 +1395,7 @@ struct Mining {
 #[derive(Default, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stratum {
+	disable: Option<bool>,
 	interface: Option<String>,
 	port: Option<u16>,
 	secret: Option<String>,
@@ -1596,6 +1613,83 @@ mod tests {
 	}
 
 	#[test]
+	fn should_disable_stratum() {
+		// given
+		let config = toml::from_str(include_str!("./tests/config.stratum_disabled.toml")).unwrap();
+
+		// when
+		let args = Args::parse_with_config(&["parity"], config).unwrap();
+
+		// then
+		assert_eq!(args.flag_stratum, false);
+		assert_eq!(args.arg_stratum_interface, "local".to_owned());
+		assert_eq!(args.arg_stratum_port, 8008u16);
+		assert_eq!(args.arg_stratum_secret, None);
+	}
+
+	#[test]
+	fn should_disable_stratum_when_missing_section() {
+		// given
+		let config = toml::from_str(include_str!("./tests/config.stratum_missing_section.toml")).unwrap();
+
+		// when
+		let args = Args::parse_with_config(&["parity"], config).unwrap();
+
+		// then
+		assert_eq!(args.flag_stratum, false);
+		assert_eq!(args.arg_stratum_interface, "local".to_owned());
+		assert_eq!(args.arg_stratum_port, 8008u16);
+		assert_eq!(args.arg_stratum_secret, None);
+	}
+
+	#[test]
+	fn should_enable_stratum() {
+		// given
+		let config = toml::from_str(include_str!("./tests/config.stratum_enabled.toml")).unwrap();
+
+		// when
+		let args = Args::parse_with_config(&["parity"], config).unwrap();
+
+		// then (with custom configurations)
+		assert_eq!(args.flag_stratum, true);
+		assert_eq!(args.arg_stratum_interface, "some_interface".to_owned());
+		assert_eq!(args.arg_stratum_port, 8007u16);
+		assert_eq!(args.arg_stratum_secret, Some("Yellow".to_owned()));
+	}
+
+	#[test]
+	fn should_enable_stratum_by_param() {
+		// given
+		let config = toml::from_str(include_str!("./tests/config.full.toml")).unwrap();
+
+		// when
+		let args = Args::parse_with_config(&["parity", "--stratum"], config).unwrap();
+
+		// then
+		assert_eq!(args.flag_stratum, true);
+		assert_eq!(args.arg_stratum_interface, "local".to_owned());
+		assert_eq!(args.arg_stratum_port, 8008u16);
+		assert_eq!(args.arg_stratum_secret, None);
+	}
+
+	#[test]
+	// For backward compatibility; Stratum should be enabled if the config file
+	// contains a `[stratum]` section and it is not explicitly disabled (disable = true)
+	fn should_enable_stratum_when_missing_field() {
+		// given
+		let config = toml::from_str(include_str!("./tests/config.stratum_missing_field.toml")).unwrap();
+
+		// when
+		let args = Args::parse_with_config(&["parity"], config).unwrap();
+
+		// then
+		assert_eq!(args.flag_stratum, true);
+		assert_eq!(args.arg_stratum_interface, "local".to_owned());
+		assert_eq!(args.arg_stratum_port, 8008u16);
+		assert_eq!(args.arg_stratum_secret, None);
+	}
+
+	#[test]
 	fn should_parse_full_config() {
 		// given
 		let config = toml::from_str(include_str!("./tests/config.full.toml")).unwrap();
@@ -1644,6 +1738,7 @@ mod tests {
 			arg_restore_file: None,
 			arg_tools_hash_file: None,
 
+			arg_enable_signing_queue: false,
 			arg_signer_sign_id: None,
 			arg_signer_reject_id: None,
 			arg_dapp_path: None,
@@ -1682,11 +1777,11 @@ mod tests {
 			arg_password: vec!["~/.safe/password.file".into()],
 			arg_keys_iterations: 10240u32,
 			arg_accounts_refresh: 5u64,
-			flag_no_hardware_wallets: false,
 			flag_fast_unlock: false,
 
 			// -- Private Transactions Options
 			flag_private_enabled: true,
+			flag_private_state_offchain: false,
 			arg_private_signer: Some("0xdeadbeefcafe0000000000000000000000000000".into()),
 			arg_private_validators: Some("0xdeadbeefcafe0000000000000000000000000000".into()),
 			arg_private_passwords: Some("~/.safe/password.file".into()),
@@ -1731,8 +1826,8 @@ mod tests {
 			arg_jsonrpc_cors: "null".into(),
 			arg_jsonrpc_apis: "web3,eth,net,parity,traces,rpc,secretstore".into(),
 			arg_jsonrpc_hosts: "none".into(),
-			arg_jsonrpc_server_threads: None,
-			arg_jsonrpc_threads: 4,
+			arg_jsonrpc_server_threads: Some(4),
+			arg_jsonrpc_threads: None, // DEPRECATED, does nothing
 			arg_jsonrpc_max_payload: None,
 			arg_poll_lifetime: 60u32,
 			flag_jsonrpc_allow_missing_blocks: false,
@@ -1750,7 +1845,7 @@ mod tests {
 			flag_no_ipc: false,
 			arg_ipc_path: "$HOME/.parity/jsonrpc.ipc".into(),
 			arg_ipc_apis: "web3,eth,net,parity,parity_accounts,personal,traces,rpc,secretstore".into(),
-
+			arg_ipc_chmod: "660".into(),
 			// DAPPS
 			arg_dapps_path: Some("$HOME/.parity/dapps".into()),
 			flag_no_dapps: false,
@@ -1774,6 +1869,7 @@ mod tests {
 			arg_secretstore_http_interface: "local".into(),
 			arg_secretstore_http_port: 8082u16,
 			arg_secretstore_path: "$HOME/.parity/secretstore".into(),
+			arg_secretstore_http_cors: "null".into(),
 
 			// IPFS
 			flag_ipfs_api: false,
@@ -1862,7 +1958,7 @@ mod tests {
 
 			// -- Whisper options.
 			flag_whisper: false,
-			arg_whisper_pool_size: 20,
+			arg_whisper_pool_size: Some(20),
 
 			// -- Legacy Options
 			flag_warp: false,
@@ -1960,11 +2056,11 @@ mod tests {
 				_legacy_public_node: None,
 			}),
 			account: Some(Account {
+				enable_signing_queue: None,
 				unlock: Some(vec!["0x1".into(), "0x2".into(), "0x3".into()]),
 				password: Some(vec!["passwdfile path".into()]),
 				keys_iterations: None,
 				refresh_time: None,
-				disable_hardware: None,
 				fast_unlock: None,
 			}),
 			ui: Some(Ui {
@@ -2010,8 +2106,7 @@ mod tests {
 				cors: None,
 				apis: None,
 				hosts: None,
-				server_threads: None,
-				processing_threads: None,
+				server_threads: Some(13),
 				max_payload: None,
 				keep_alive: None,
 				experimental_rpcs: None,
@@ -2021,6 +2116,7 @@ mod tests {
 			ipc: Some(Ipc {
 				disable: None,
 				path: None,
+				chmod: None,
 				apis: Some(vec!["rpc".into(), "eth".into()]),
 			}),
 			dapps: Some(Dapps {
@@ -2052,6 +2148,7 @@ mod tests {
 				http_interface: None,
 				http_port: Some(8082),
 				path: None,
+				cors: None,
 			}),
 			private_tx: None,
 			ipfs: Some(Ipfs {

@@ -9,15 +9,16 @@ image:                             ${REGISTRY}/parity-ci-linux:latest
 variables:
   GIT_STRATEGY:                    fetch
   GIT_SUBMODULE_STRATEGY:          recursive
+  GIT_DEPTH:                       3
   CI_SERVER_NAME:                  "GitLab CI"
   CARGO_HOME:                      "/ci-cache/${CI_PROJECT_NAME}/cargo/${CI_JOB_NAME}"
   CARGO_TARGET:                    x86_64-unknown-linux-gnu
+  CARGO_INCREMENTAL:               0
   REGISTRY:                        registry.parity.io/parity/infrastructure/scripts
 
 .releaseable_branches:             # list of git refs for building GitLab artifacts (think "pre-release binaries")
   only:                            &releaseable_branches
     - stable
-    - beta
     - tags
     - schedules
 
@@ -31,9 +32,8 @@ variables:
       - tools/
 
 .docker-cache-status:              &docker-cache-status
-  variables:
-    CARGO_HOME:                    "/ci-cache/parity-ethereum/cargo/${CI_JOB_NAME}"
   dependencies:                    []
+  interruptible:                   true
   before_script:
     - rustup show
     - cargo --version
@@ -112,12 +112,6 @@ validate-chainspecs:
   script:
     - ./scripts/gitlab/validate-chainspecs.sh
 
-test-cpp:
-  stage:                           build
-  <<:                              *docker-cache-status
-  script:
-    - ./scripts/gitlab/test-cpp.sh
-
 test-linux:
   stage:                           build
   <<:                              *docker-cache-status
@@ -138,12 +132,6 @@ test-linux-nightly:
   script:
     - ./scripts/gitlab/test-linux.sh nightly
   allow_failure:                   true
-
-build-android:
-  <<:                              *build-on-linux
-  image:                           ${REGISTRY}/parity-ci-android:stretch
-  variables:
-    CARGO_TARGET:                  armv7-linux-androideabi
 
 build-linux:
   <<:                              *build-on-linux
@@ -177,8 +165,6 @@ build-darwin:
   variables:
     CARGO_TARGET:                  x86_64-apple-darwin
     CARGO_HOME:                    "${CI_PROJECT_DIR}/.cargo"
-    CC:                            gcc
-    CXX:                           g++
   script:
     - scripts/gitlab/build-linux.sh
   tags:
@@ -319,7 +305,7 @@ publish-release-awss3-nightly:     &publish-release-awss3
   script:
     - echo "__________Push binaries to AWS S3____________"
     - case "${SCHEDULE_TAG:-${CI_COMMIT_REF_NAME}}" in
-       (beta|stable|nightly)
+       (stable|nightly)
          export BUCKET=releases.parity.io/ethereum;
          ;;
        (*)

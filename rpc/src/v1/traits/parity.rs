@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 
 use ethereum_types::{H64, H160, H256, H512, U64, U256};
+use ethcore::miner::FilterOptions;
 use jsonrpc_core::{BoxFuture, Result};
 use jsonrpc_derive::rpc;
 use v1::types::{
@@ -116,7 +117,13 @@ pub trait Parity {
 	/// Returns all storage keys of the given address (first parameter) if Fat DB is enabled (`--fat-db`),
 	/// or null if not.
 	#[rpc(name = "parity_listStorageKeys")]
-	fn list_storage_keys(&self, _: H160, _: u64, _: Option<H256>, _: Option<BlockNumber>) -> Result<Option<Vec<H256>>>;
+	fn list_storage_keys(
+		&self,
+		_: H160,
+		_: Option<u64>,
+		_: Option<H256>,
+		_: Option<BlockNumber>,
+	) -> Result<Option<Vec<H256>>>;
 
 	/// Encrypt some data with a public key under ECIES.
 	/// First parameter is the 512-byte destination public key, second is the message.
@@ -125,7 +132,7 @@ pub trait Parity {
 
 	/// Returns all pending transactions from transaction queue.
 	#[rpc(name = "parity_pendingTransactions")]
-	fn pending_transactions(&self, _: Option<usize>) -> Result<Vec<Transaction>>;
+	fn pending_transactions(&self, _: Option<usize>, _: Option<FilterOptions>) -> Result<Vec<Transaction>>;
 
 	/// Returns all transactions from transaction queue.
 	///
@@ -232,4 +239,12 @@ pub trait Parity {
 	/// Is allowed to skip filling transaction hash for faster query.
 	#[rpc(name = "parity_getLogsNoTransactionHash")]
 	fn logs_no_tx_hash(&self, _: Filter) -> BoxFuture<Vec<Log>>;
+
+	/// Returns raw block RLP with given number.
+	#[rpc(name = "parity_getRawBlockByNumber")]
+	fn get_raw_block_by_number(&self, _: BlockNumber) -> BoxFuture<Option<Bytes>>;
+
+	/// Submit raw block to be published to the network
+	#[rpc(name = "parity_submitRawBlock")]
+	fn submit_raw_block(&self, _: Bytes) -> Result<H256>;
 }
