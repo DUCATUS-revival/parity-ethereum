@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -19,8 +19,10 @@ extern crate criterion;
 
 #[macro_use]
 extern crate lazy_static;
-extern crate ethcore_builtin;
+
+extern crate machine;
 extern crate ethcore;
+extern crate ethcore_builtin;
 extern crate ethereum_types;
 extern crate parity_bytes as bytes;
 extern crate rustc_hex;
@@ -28,13 +30,13 @@ extern crate rustc_hex;
 use criterion::{Criterion, Bencher};
 use bytes::BytesRef;
 use ethcore_builtin::Builtin;
-use ethcore::machine::EthereumMachine;
-use ethereum_types::U256;
-use ethcore::ethereum::new_byzantium_test_machine;
+use ethereum_types::H160;
+use machine::Machine;
+use machine::test_helpers::new_byzantium_test_machine;
 use rustc_hex::FromHex;
 
 lazy_static! {
-	static ref BYZANTIUM_MACHINE: EthereumMachine = new_byzantium_test_machine();
+	static ref BYZANTIUM_MACHINE: Machine = new_byzantium_test_machine();
 }
 
 struct BuiltinBenchmark<'a> {
@@ -46,8 +48,9 @@ struct BuiltinBenchmark<'a> {
 impl<'a> BuiltinBenchmark<'a> {
 	fn new(builtin_address: &'static str, input: &str, expected: &str) -> BuiltinBenchmark<'a> {
 		let builtins = BYZANTIUM_MACHINE.builtins();
-
-		let builtin = builtins.get(&builtin_address.into()).unwrap().clone();
+		use std::str::FromStr;
+		let addr = H160::from_str(builtin_address).unwrap();
+		let builtin = builtins.get(&addr).unwrap().clone();
 		let input = FromHex::from_hex(input).unwrap();
 		let expected = FromHex::from_hex(expected).unwrap();
 

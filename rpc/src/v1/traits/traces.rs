@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -62,5 +62,9 @@ pub trait Traces {
 
 	/// Executes all the transactions at the given block and returns a number of possible traces for each transaction.
 	#[rpc(name = "trace_replayBlockTransactions")]
-	fn replay_block_transactions(&self, _: BlockNumber, _: TraceOptions) ->  Result<Vec<TraceResultsWithTransactionHash>>;
+	fn replay_block_transactions(
+		&self,
+		_: BlockNumber,
+		_: TraceOptions
+	) -> Result<Vec<TraceResultsWithTransactionHash>>;
 }

@@ -57,7 +57,7 @@ We recommend installing Rust through [rustup](https://www.rustup.rs/). If you do
   $ curl https://sh.rustup.rs -sSf | sh
   ```
 
-  Parity Ethereum also requires `gcc`, `g++`, `libudev-dev`, `pkg-config`, `file`, `make`, and `cmake` packages to be installed.
+  Parity Ethereum also requires `gcc`, `g++`, `pkg-config`, `file`, `make`, and `cmake` packages to be installed.
 
 - OSX:
   ```bash
@@ -320,10 +320,6 @@ Caching, Importing Blocks, and Block Information
   patricia-trie-ethereum registrar rlp_compress rlp_derive parity-runtime stats
   time-utils triehash-ethereum unexpected parity-version
   ```
-* Parity Whisper Protocol Implementation
-  ```bash
-  parity-whisper whisper-cli
-  ```
 
 </p></details>
 
@@ -360,10 +356,10 @@ In addition to the Parity Ethereum client, there are additional tools in this re
 - [evmbin](./evmbin) - Parity Ethereum EVM Implementation.
 - [ethstore](./accounts/ethstore) - Parity Ethereum Key Management.
 - [ethkey](./accounts/ethkey) - Parity Ethereum Keys Generator.
-- [whisper](./whisper) - Parity Ethereum Whisper-v2 PoC Implementation.
 
 The following tool is available in a separate repository:
 - [ethabi](https://github.com/paritytech/ethabi) - Parity Ethereum Encoding of Function Calls. [Docs here](https://crates.io/crates/ethabi)
+- [whisper](https://github.com/paritytech/whisper) - Parity Ethereum Whisper-v2 PoC Implementation.
 
 ## 7. Community <a id="chapter-007"></a>
 

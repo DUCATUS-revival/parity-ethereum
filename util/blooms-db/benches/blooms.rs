@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -38,7 +38,7 @@ fn bench_blooms_filter_1_million_ok(c: &mut Criterion) {
 	let tempdir = TempDir::new("").unwrap();
 	let database = Database::open(tempdir.path()).unwrap();
 	database.insert_blooms(999_999, iter::once(&Bloom::zero())).unwrap();
-	let bloom = Bloom::from(0x001);
+	let bloom = Bloom::from_low_u64_be(0x001);
 	database.insert_blooms(200_000, iter::once(&bloom)).unwrap();
 	database.insert_blooms(400_000, iter::once(&bloom)).unwrap();
 	database.insert_blooms(600_000, iter::once(&bloom)).unwrap();
@@ -56,8 +56,8 @@ fn bench_blooms_filter_1_million_miss(c: &mut Criterion) {
 	let tempdir = TempDir::new("").unwrap();
 	let database = Database::open(tempdir.path()).unwrap();
 	database.insert_blooms(999_999, iter::once(&Bloom::zero())).unwrap();
-	let bloom = Bloom::from(0x001);
-	let bad_bloom = Bloom::from(0x0001);
+	let bloom = Bloom::from_low_u64_be(0x001);
+	let bad_bloom = Bloom::from_low_u64_be(0x0001);
 	database.insert_blooms(200_000, iter::once(&bloom)).unwrap();
 	database.insert_blooms(400_000, iter::once(&bloom)).unwrap();
 	database.insert_blooms(600_000, iter::once(&bloom)).unwrap();
@@ -75,8 +75,8 @@ fn bench_blooms_filter_1_million_miss_and_ok(c: &mut Criterion) {
 	let tempdir = TempDir::new("").unwrap();
 	let database = Database::open(tempdir.path()).unwrap();
 	database.insert_blooms(999_999, iter::once(&Bloom::zero())).unwrap();
-	let bloom = Bloom::from(0x001);
-	let bad_bloom = Bloom::from(0x0001);
+	let bloom = Bloom::from_low_u64_be(0x001);
+	let bad_bloom = Bloom::from_low_u64_be(0x0001);
 	database.insert_blooms(200_000, iter::once(&bloom)).unwrap();
 	database.insert_blooms(400_000, iter::once(&bloom)).unwrap();
 	database.insert_blooms(600_000, iter::once(&bloom)).unwrap();

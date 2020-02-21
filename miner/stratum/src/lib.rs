@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -70,7 +70,7 @@ pub struct Stratum {
 impl Stratum {
 	pub fn start(
 		addr: &SocketAddr,
-		dispatcher: Arc<JobDispatcher>,
+		dispatcher: Arc<dyn JobDispatcher>,
 		secret: Option<H256>,
 	) -> Result<Arc<Stratum>, Error> {
 
@@ -124,7 +124,7 @@ struct StratumImpl {
 	/// List of workers supposed to receive job update
 	job_queue: RwLock<HashSet<SocketAddr>>,
 	/// Payload manager
-	dispatcher: Arc<JobDispatcher>,
+	dispatcher: Arc<dyn JobDispatcher>,
 	/// Authorized workers (socket - worker_id)
 	workers: Arc<RwLock<HashMap<SocketAddr, String>>>,
 	/// Secret if any
@@ -221,7 +221,7 @@ impl StratumImpl {
 			let workers_msg = format!("{{ \"id\": {}, \"method\": \"mining.notify\", \"params\": {} }}", next_request_id, payload);
 			trace!(target: "stratum", "pushing work for {} workers (payload: '{}')", workers.len(), &workers_msg);
 			for (addr, _) in workers.iter() {
-				trace!(target: "stratum", "pusing work to {}", addr);
+				trace!(target: "stratum", "pushing work to {}", addr);
 				match tcp_dispatcher.push_message(addr, workers_msg.clone()) {
 					Err(PushMessageError::NoSuchPeer) => {
 						trace!(target: "stratum", "Worker no longer connected: {}", addr);
