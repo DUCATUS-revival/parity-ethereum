@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -290,7 +290,7 @@ impl Host {
 		} else {
 			config.config_path.clone().and_then(|ref p| load_key(Path::new(&p)))
 				.map_or_else(|| {
-				let key = Random.generate().expect("Error generating random key pair");
+				let key = Random.generate();
 				if let Some(path) = config.config_path.clone() {
 					save_key(Path::new(&path), key.secret());
 				}
@@ -461,7 +461,7 @@ impl Host {
 				let public_address = select_public_address(local_endpoint.address.port());
 				let public_endpoint = NodeEndpoint { address: public_address, udp_port: local_endpoint.udp_port };
 				if self.info.read().config.nat_enabled {
-					match map_external_address(&local_endpoint) {
+					match map_external_address(&local_endpoint, &self.info.read().config.nat_type) {
 						Some(endpoint) => {
 							info!("NAT mapped to external address {}", endpoint.address);
 							endpoint

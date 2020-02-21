@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::{Arc, mpsc, atomic};
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeSet, HashMap, BTreeMap};
 use std::io;
 use std::ops::RangeInclusive;
 use std::time::Duration;
@@ -27,10 +27,11 @@ use crate::sync_io::NetSyncIo;
 use crate::light_sync::{self, SyncInfo};
 use crate::private_tx::PrivateTxHandler;
 use crate::chain::{
+	fork_filter::ForkFilterApi,
 	sync_packet::SyncPacket::{PrivateTransactionPacket, SignedPrivateTransactionPacket},
-	ChainSyncApi, SyncState, SyncStatus as EthSyncStatus, ETH_PROTOCOL_VERSION_62,
-	ETH_PROTOCOL_VERSION_63, PAR_PROTOCOL_VERSION_1, PAR_PROTOCOL_VERSION_2,
-	PAR_PROTOCOL_VERSION_3, PAR_PROTOCOL_VERSION_4,
+	ChainSyncApi, SyncState, SyncStatus as EthSyncStatus,
+	ETH_PROTOCOL_VERSION_63, ETH_PROTOCOL_VERSION_64,
+	PAR_PROTOCOL_VERSION_1, PAR_PROTOCOL_VERSION_2, PAR_PROTOCOL_VERSION_3, PAR_PROTOCOL_VERSION_4,
 };
 
 use bytes::Bytes;
@@ -49,12 +50,11 @@ use light::net::{
 	Capabilities, Handler as LightHandler, EventContext, SampleStore,
 };
 use log::{trace, warn};
-use macros::hash_map;
 use network::{
 	client_version::ClientVersion,
 	NetworkProtocolHandler, NetworkContext, PeerId, ProtocolId,
 	NetworkConfiguration as BasicNetworkConfiguration, NonReservedPeerMode, Error,
-	ConnectionFilter, IpFilter
+	ConnectionFilter, IpFilter, NatType
 };
 use snapshot::SnapshotService;
 use parking_lot::{RwLock, Mutex};
@@ -269,6 +269,8 @@ pub struct Params {
 	pub executor: Executor,
 	/// Blockchain client.
 	pub chain: Arc<dyn BlockChainClient>,
+	/// Forks.
+	pub forks: BTreeSet<BlockNumber>,
 	/// Snapshot service.
 	pub snapshot_service: Arc<dyn SnapshotService>,
 	/// Private tx service.
@@ -349,10 +351,13 @@ impl EthSync {
 			})
 		};
 
+		let fork_filter = ForkFilterApi::new(&*params.chain, params.forks);
+
 		let (priority_tasks_tx, priority_tasks_rx) = mpsc::channel();
 		let sync = ChainSyncApi::new(
 			params.config,
 			&*params.chain,
+			fork_filter,
 			params.private_tx_handler.as_ref().cloned(),
 			priority_tasks_rx,
 		);
@@ -606,7 +611,7 @@ impl ChainNotify for EthSync {
 			_ => {},
 		}
 
-		self.network.register_protocol(self.eth_handler.clone(), self.subprotocol_name, &[ETH_PROTOCOL_VERSION_62, ETH_PROTOCOL_VERSION_63])
+		self.network.register_protocol(self.eth_handler.clone(), self.subprotocol_name, &[ETH_PROTOCOL_VERSION_63, ETH_PROTOCOL_VERSION_64])
 			.unwrap_or_else(|e| warn!("Error registering ethereum protocol: {:?}", e));
 		// register the warp sync subprotocol
 		self.network.register_protocol(self.eth_handler.clone(), WARP_SYNC_PROTOCOL_ID, &[PAR_PROTOCOL_VERSION_1, PAR_PROTOCOL_VERSION_2, PAR_PROTOCOL_VERSION_3, PAR_PROTOCOL_VERSION_4])
@@ -742,6 +747,8 @@ pub struct NetworkConfiguration {
 	pub udp_port: Option<u16>,
 	/// Enable NAT configuration
 	pub nat_enabled: bool,
+	/// Nat type
+	pub nat_type: NatType,
 	/// Enable discovery
 	pub discovery_enabled: bool,
 	/// List of initial node addresses
@@ -786,13 +793,18 @@ impl NetworkConfiguration {
 			public_address: match self.public_address { None => None, Some(addr) => Some(SocketAddr::from_str(&addr)?) },
 			udp_port: self.udp_port,
 			nat_enabled: self.nat_enabled,
+			nat_type: self.nat_type,
 			discovery_enabled: self.discovery_enabled,
 			boot_nodes: self.boot_nodes,
 			use_secret: self.use_secret,
 			max_peers: self.max_peers,
 			min_peers: self.min_peers,
 			max_handshakes: self.max_pending_peers,
-			reserved_protocols: hash_map![WARP_SYNC_PROTOCOL_ID => self.snapshot_peers],
+			reserved_protocols: {
+				let mut reserved = HashMap::new();
+				reserved.insert(WARP_SYNC_PROTOCOL_ID, self.snapshot_peers);
+				reserved
+			},
 			reserved_nodes: self.reserved_nodes,
 			ip_filter: self.ip_filter,
 			non_reserved_mode: if self.allow_non_reserved { NonReservedPeerMode::Accept } else { NonReservedPeerMode::Deny },
@@ -810,6 +822,7 @@ impl From<BasicNetworkConfiguration> for NetworkConfiguration {
 			public_address: other.public_address.and_then(|addr| Some(format!("{}", addr))),
 			udp_port: other.udp_port,
 			nat_enabled: other.nat_enabled,
+			nat_type: other.nat_type,
 			discovery_enabled: other.discovery_enabled,
 			boot_nodes: other.boot_nodes,
 			use_secret: other.use_secret,

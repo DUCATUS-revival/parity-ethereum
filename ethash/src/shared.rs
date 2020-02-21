@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -69,7 +69,7 @@ pub type NodeBytes = [u8; NODE_BYTES];
 pub type NodeWords = [u32; NODE_WORDS];
 pub type NodeDwords = [u64; NODE_DWORDS];
 
-assert_eq_size!(node; Node, NodeBytes, NodeWords, NodeDwords);
+assert_eq_size!(Node, NodeBytes, NodeWords, NodeDwords);
 
 #[repr(C)]
 pub union Node {

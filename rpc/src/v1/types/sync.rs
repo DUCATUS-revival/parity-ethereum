@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -195,8 +195,6 @@ pub struct ChainStatus {
 
 #[cfg(test)]
 mod tests {
-	use serde_json;
-	use std::collections::BTreeMap;
 	use super::{SyncInfo, SyncStatus, Peers, TransactionStats, ChainStatus, H512};
 
 	#[test]
@@ -240,9 +238,7 @@ mod tests {
 	fn test_serialize_transaction_stats() {
 		let stats = TransactionStats {
 			first_seen: 100,
-			propagated_to: map![
-				H512::from_low_u64_be(10) => 50
-			],
+			propagated_to: btreemap![H512::from_low_u64_be(10) => 50],
 		};
 
 		let serialized = serde_json::to_string(&stats).unwrap();

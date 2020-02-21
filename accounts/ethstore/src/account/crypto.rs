@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -164,7 +164,7 @@ mod tests {
 
 	#[test]
 	fn crypto_with_secret_create() {
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let passwd = "this is sparta".into();
 		let crypto = Crypto::with_secret(keypair.secret(), &passwd, 10240).unwrap();
 		let secret = crypto.secret(&passwd).unwrap();
@@ -173,7 +173,7 @@ mod tests {
 
 	#[test]
 	fn crypto_with_secret_invalid_password() {
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let crypto = Crypto::with_secret(keypair.secret(), &"this is sparta".into(), 10240).unwrap();
 		assert_matches!(crypto.secret(&"this is sparta!".into()), Err(Error::InvalidPassword))
 	}

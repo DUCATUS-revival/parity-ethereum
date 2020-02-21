@@ -7,8 +7,8 @@ version = "1.12.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 
 [dependencies]
-derive_more = "0.14.0"
-parity-crypto = { version = "0.4.2", features = ["publickey"] }
+derive_more = "0.99"
+parity-crypto = { version = "0.5.0", features = ["publickey"] }
 ethcore-io = { path = "../io" }
 ethereum-types = "0.8.0"
 ipnetwork = "0.12.6"

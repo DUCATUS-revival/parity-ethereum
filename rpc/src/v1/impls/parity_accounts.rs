@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -118,7 +118,7 @@ impl ParityAccounts for ParityAccountsClient {
 
 	fn new_account_from_phrase(&self, phrase: String, pass: Password) -> Result<H160> {
 		self.deprecation_notice("parity_newAccountFromPhrase");
-		let brain = Brain::new(phrase).generate().unwrap();
+		let brain = Brain::new(phrase).generate();
 		self.accounts.insert_account(brain.secret().clone(), &pass)
 			.map(Into::into)
 			.map_err(|e| errors::account("Could not create account.", e))

@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -34,7 +34,7 @@ use common_types::{
 	errors::{EngineError, EthcoreError as Error},
 	transaction::{self, SYSTEM_ADDRESS, UNSIGNED_SENDER, UnverifiedTransaction, SignedTransaction},
 };
-use vm::{CallType, ActionParams, ActionValue, ParamsType};
+use vm::{ActionType, ActionParams, ActionValue, ParamsType};
 use vm::{EnvInfo, Schedule};
 
 use account_state::CleanupMode;
@@ -141,7 +141,7 @@ impl Machine {
 		value: Option<ActionValue>,
 		gas: U256,
 		data: Option<Vec<u8>>,
-		call_type: Option<CallType>,
+		action_type: Option<ActionType>,
 	) -> Result<Vec<u8>, Error> {
 		let env_info = {
 			let mut env_info = block.env_info();
@@ -163,7 +163,7 @@ impl Machine {
 			code_hash,
 			code_version: 0.into(),
 			data,
-			call_type: call_type.unwrap_or(CallType::Call),
+			action_type: action_type.unwrap_or(ActionType::Call),
 			params_type: ParamsType::Separate,
 		};
 		let schedule = self.schedule(env_info.number);
@@ -343,7 +343,7 @@ impl Machine {
 		} else {
 			None
 		};
-		t.verify_basic(check_low_s, chain_id, false)?;
+		t.verify_basic(check_low_s, chain_id)?;
 
 		Ok(())
 	}
@@ -423,19 +423,10 @@ mod tests {
 	fn should_disallow_unsigned_transactions() {
 		let rlp = "ea80843b9aca0083015f90948921ebb5f79e9e3920abe571004d0b1d5119c154865af3107a400080038080";
 		let transaction: UnverifiedTransaction = ::rlp::decode(&::rustc_hex::FromHex::from_hex(rlp).unwrap()).unwrap();
-		let spec = spec::new_ropsten_test();
-		let ethparams = get_default_ethash_extensions();
-
-		let machine = Machine::with_ethash_extensions(
-			spec.params().clone(),
-			Default::default(),
-			ethparams,
+		assert_eq!(
+			transaction::Error::from(transaction.verify_unordered().unwrap_err()),
+			transaction::Error::InvalidSignature("invalid EC signature".into()),
 		);
-		let mut header = Header::new();
-		header.set_number(15);
-
-		let res = machine.verify_transaction_basic(&transaction, &header);
-		assert_eq!(res, Err(transaction::Error::InvalidSignature("invalid EC signature".into())));
 	}
 
 	#[test]

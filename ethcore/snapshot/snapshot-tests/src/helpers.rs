@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -91,7 +91,7 @@ impl StateProducer {
 			let mut account: BasicAccount = rlp::decode(&*account_data).expect("error decoding basic account");
 			let acct_db = AccountDBMut::from_hash(db, *address_hash);
 			fill_storage(acct_db, &mut account.storage_root, &mut self.storage_seed);
-			*account_data = DBValue::from_vec(rlp::encode(&account));
+			*account_data = rlp::encode(&account);
 		}
 
 		// sweep again to alter account trie.

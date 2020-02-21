@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -28,8 +28,11 @@ pub use self::headers::Headers;
 
 /// Something which can produce a hash and a parent hash.
 pub trait BlockLike {
-	/// Get the hash of this item.
+	/// Get the hash of this item - i.e. the header hash.
 	fn hash(&self) -> H256;
+
+	/// Get a raw hash of this item - i.e. the hash of the RLP representation.
+	fn raw_hash(&self) -> H256;
 
 	/// Get the hash of this item's parent.
 	fn parent_hash(&self) -> H256;
@@ -59,7 +62,14 @@ pub trait Kind: 'static + Sized + Send + Sync {
 	type Verified: Sized + Send + BlockLike + MallocSizeOf;
 
 	/// Attempt to create the `Unverified` item from the input.
-	fn create(input: Self::Input, engine: &dyn Engine, check_seal: bool) -> Result<Self::Unverified, (Self::Input, Error)>;
+	///
+	/// The return type is quite complex because in some scenarios the input
+	/// is needed (typically for BlockError) to get the raw block bytes without cloning them
+	fn create(
+		input: Self::Input,
+		engine: &dyn Engine,
+		check_seal: bool
+	) -> Result<Self::Unverified, (Error, Option<Self::Input>)>;
 
 	/// Attempt to verify the `Unverified` item using the given engine.
 	fn verify(unverified: Self::Unverified, engine: &dyn Engine, check_seal: bool) -> Result<Self::Verified, Error>;
@@ -88,16 +98,20 @@ pub mod blocks {
 		type Unverified = Unverified;
 		type Verified = PreverifiedBlock;
 
-		fn create(input: Self::Input, engine: &dyn Engine, check_seal: bool) -> Result<Self::Unverified, (Self::Input, Error)> {
+		fn create(
+			input: Self::Input,
+			engine: &dyn Engine,
+			check_seal: bool
+		) -> Result<Self::Unverified, (Error, Option<Self::Input>)> {
 			match verify_block_basic(&input, engine, check_seal) {
 				Ok(()) => Ok(input),
 				Err(Error::Block(BlockError::TemporarilyInvalid(oob))) => {
 					debug!(target: "client", "Block received too early {}: {:?}", input.hash(), oob);
-					Err((input, BlockError::TemporarilyInvalid(oob).into()))
+					Err((BlockError::TemporarilyInvalid(oob).into(), Some(input)))
 				},
 				Err(e) => {
 					warn!(target: "client", "Stage 1 block verification failed for {}: {:?}", input.hash(), e);
-					Err((input, e))
+					Err((e, Some(input)))
 				}
 			}
 		}
@@ -119,12 +133,16 @@ pub mod blocks {
 			self.header.hash()
 		}
 
+		fn raw_hash(&self) -> H256 {
+			keccak_hash::keccak(&self.bytes)
+		}
+
 		fn parent_hash(&self) -> H256 {
-			self.header.parent_hash().clone()
+			*self.header.parent_hash()
 		}
 
 		fn difficulty(&self) -> U256 {
-			self.header.difficulty().clone()
+			*self.header.difficulty()
 		}
 	}
 
@@ -133,12 +151,16 @@ pub mod blocks {
 			self.header.hash()
 		}
 
+		fn raw_hash(&self) -> H256 {
+			keccak_hash::keccak(&self.bytes)
+		}
+
 		fn parent_hash(&self) -> H256 {
-			self.header.parent_hash().clone()
+			*self.header.parent_hash()
 		}
 
 		fn difficulty(&self) -> U256 {
-			self.header.difficulty().clone()
+			*self.header.difficulty()
 		}
 	}
 }
@@ -158,8 +180,9 @@ pub mod headers {
 
 	impl BlockLike for Header {
 		fn hash(&self) -> H256 { self.hash() }
-		fn parent_hash(&self) -> H256 { self.parent_hash().clone() }
-		fn difficulty(&self) -> U256 { self.difficulty().clone() }
+		fn raw_hash(&self) -> H256 { self.hash() }
+		fn parent_hash(&self) -> H256 { *self.parent_hash() }
+		fn difficulty(&self) -> U256 { *self.difficulty() }
 	}
 
 	/// A mode for verifying headers.
@@ -170,19 +193,23 @@ pub mod headers {
 		type Unverified = Header;
 		type Verified = Header;
 
-		fn create(input: Self::Input, engine: &dyn Engine, check_seal: bool) -> Result<Self::Unverified, (Self::Input, Error)> {
+		fn create(
+			input: Self::Input,
+			engine: &dyn Engine,
+			check_seal: bool
+		) -> Result<Self::Unverified, (Error, Option<Self::Input>)> {
 			let res = verify_header_params(&input, engine, check_seal)
 				.and_then(|_| verify_header_time(&input));
 
 			match res {
 				Ok(_) => Ok(input),
-				Err(err) => Err((input, err))
+				Err(e) => Err((e, Some(input))),
 			}
 		}
 
 		fn verify(unverified: Self::Unverified, engine: &dyn Engine, check_seal: bool) -> Result<Self::Verified, Error> {
 			match check_seal {
-				true => engine.verify_block_unordered(&unverified,).map(|_| unverified),
+				true => engine.verify_block_unordered(&unverified).map(|_| unverified),
 				false => Ok(unverified),
 			}
 		}

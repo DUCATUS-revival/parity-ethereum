@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -29,7 +29,6 @@ use bytes::ToPretty;
 use ethereum_types::{Address, H256, H264, U256};
 use hash::keccak;
 use hash_db::EMPTY_PREFIX;
-use itertools::Itertools;
 use kvdb::{DBTransaction, DBValue, KeyValueDB};
 use parking_lot::{Mutex, RwLock};
 use rand::rngs::OsRng;
@@ -79,6 +78,7 @@ use client_traits::{
 	StateOrBlock,
 	Tick,
 	TransactionInfo,
+	TransactionRequest,
 	ForceUpdateSealing
 };
 use db::{keys::BlockDetails, Readable, Writable};
@@ -261,7 +261,7 @@ impl Importer {
 		let block_queue = BlockQueue::new(
 			config.queue.clone(),
 			engine.clone(),
-			message_channel.clone(),
+			message_channel,
 			config.verifier_type.verifying_seal()
 		);
 
@@ -403,11 +403,11 @@ impl Importer {
 		let verify_external_result = engine.verify_block_external(&header);
 		if let Err(e) = verify_external_result {
 			warn!(target: "client", "Stage 4 block verification failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
-			return Err(e.into());
+			return Err(e);
 		};
 
 		// Enact Verified Block
-		let last_hashes = client.build_last_hashes(header.parent_hash());
+		let last_hashes = client.build_last_hashes(*header.parent_hash());
 		let db = client.state_db.read().boxed_clone_canon(header.parent_hash());
 
 		let is_epoch_begin = chain.epoch_transition(parent.number(), *header.parent_hash()).is_some();
@@ -427,7 +427,7 @@ impl Importer {
 			Ok(b) => b,
 			Err(e) => {
 				warn!(target: "client", "Block import failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
-				return Err(e.into());
+				return Err(e);
 			}
 		};
 
@@ -443,7 +443,7 @@ impl Importer {
 		// Final Verification
 		if let Err(e) = verification::verify_block_final(&header, &locked_block.header) {
 			warn!(target: "client", "Stage 5 block verification failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
-			return Err(e.into());
+			return Err(e);
 		}
 
 		let pending = self.check_epoch_end_signal(
@@ -561,14 +561,14 @@ impl Importer {
 			a
 		}).collect();
 
-		let route = chain.insert_block(&mut batch, block_data, receipts.clone(), ExtrasInsert {
+		let route = chain.insert_block(&mut batch, block_data, receipts, ExtrasInsert {
 			fork_choice,
 			is_finalized,
 		});
 
 		client.tracedb.read().import(&mut batch, TraceImportRequest {
 			traces: traces.into(),
-			block_hash: hash.clone(),
+			block_hash: *hash,
 			block_number: number,
 			enacted: route.enacted.clone(),
 			retracted: route.retracted.len()
@@ -618,10 +618,10 @@ impl Importer {
 					Proof::WithState(with_state) => {
 						let env_info = EnvInfo {
 							number: header.number(),
-							author: header.author().clone(),
+							author: *header.author(),
 							timestamp: header.timestamp(),
-							difficulty: header.difficulty().clone(),
-							last_hashes: client.build_last_hashes(header.parent_hash()),
+							difficulty: *header.difficulty(),
+							last_hashes: client.build_last_hashes(*header.parent_hash()),
 							gas_used: U256::default(),
 							gas_limit: u64::max_value().into(),
 						};
@@ -635,7 +635,7 @@ impl Importer {
 
 							let mut state = State::from_existing(
 								backend,
-								header.state_root().clone(),
+								*header.state_root(),
 								self.engine.account_start_nonce(header.number()),
 								client.factories.clone(),
 							).expect("state known to be available for just-imported block; qed");
@@ -646,15 +646,13 @@ impl Importer {
 							let res = Executive::new(&mut state, &env_info, &machine, &schedule)
 								.transact(&transaction, options);
 
-							let res = match res {
+							match res {
 								Err(e) => {
 									trace!(target: "client", "Proved call failed: {}", e);
 									Err(e.to_string())
 								}
 								Ok(res) => Ok((res.output, state.drop().1.extract_proof())),
-							};
-
-							res.map(|(output, proof)| (output, proof.into_iter().map(|x| x.into_vec()).collect()))
+							}
 						};
 
 						match with_state.generate_proof(&call) {
@@ -670,7 +668,7 @@ impl Importer {
 
 				debug!(target: "client", "Block {} signals epoch end.", hash);
 
-				Ok(Some(PendingTransition { proof: proof }))
+				Ok(Some(PendingTransition { proof }))
 			},
 			EpochChange::No => Ok(None),
 			EpochChange::Unsure(_) => {
@@ -778,7 +776,7 @@ impl Client {
 			chain: RwLock::new(chain),
 			tracedb,
 			engine,
-			pruning: config.pruning.clone(),
+			pruning: config.pruning,
 			snapshotting_at: AtomicU64::new(0),
 			db: RwLock::new(db.clone()),
 			state_db: RwLock::new(state_db),
@@ -825,7 +823,7 @@ impl Client {
 				chain.insert_epoch_transition(&mut batch, 0, EpochTransition {
 					block_hash: gh.hash(),
 					block_number: 0,
-					proof: proof,
+					proof,
 				});
 
 				client.db.read().key_value().write_buffered(batch);
@@ -902,17 +900,17 @@ impl Client {
 				author: header.author(),
 				timestamp: header.timestamp(),
 				difficulty: header.difficulty(),
-				last_hashes: self.build_last_hashes(&header.parent_hash()),
+				last_hashes: self.build_last_hashes(header.parent_hash()),
 				gas_used: U256::default(),
 				gas_limit: header.gas_limit(),
 			}
 		})
 	}
 
-	fn build_last_hashes(&self, parent_hash: &H256) -> Arc<LastHashes> {
+	fn build_last_hashes(&self, parent_hash: H256) -> Arc<LastHashes> {
 		{
 			let hashes = self.last_hashes.read();
-			if hashes.front().map_or(false, |h| h == parent_hash) {
+			if hashes.front().map_or(false, |h| h == &parent_hash) {
 				let mut res = Vec::from(hashes.clone());
 				res.resize(256, H256::zero());
 				return Arc::new(res);
@@ -920,12 +918,12 @@ impl Client {
 		}
 		let mut last_hashes = LastHashes::new();
 		last_hashes.resize(256, H256::zero());
-		last_hashes[0] = parent_hash.clone();
+		last_hashes[0] = parent_hash;
 		let chain = self.chain.read();
 		for i in 0..255 {
 			match chain.block_details(&last_hashes[i]) {
 				Some(details) => {
-					last_hashes[i + 1] = details.parent.clone();
+					last_hashes[i + 1] = details.parent;
 				},
 				None => break,
 			}
@@ -942,7 +940,7 @@ impl Client {
 		let call = |a, d| {
 			let tx = self.contract_call_tx(id, a, d);
 			let (result, items) = self.prove_transaction(tx, id)
-				.ok_or_else(|| format!("Unable to make call. State unavailable?"))?;
+				.ok_or_else(|| "Unable to make call. State unavailable?".to_string())?;
 
 			let items = items.into_iter().map(|x| x.to_vec()).collect();
 			Ok((result, items))
@@ -1297,7 +1295,11 @@ impl DatabaseRestore for Client {
 impl BlockChainReset for Client {
 	fn reset(&self, num: u32) -> Result<(), String> {
 		if num as u64 > self.pruning_history() {
-			return Err(format!("Attempting to reset the chain {} blocks back failed: state is pruned (max available: {})", num, self.pruning_history()).into())
+			return Err(
+				format!("Attempting to reset the chain {} blocks back failed: state is pruned (max available: {})",
+					num,
+					self.pruning_history()
+			));
 		} else if num == 0 {
 			return Err("0 is an invalid number of blocks to reset".into())
 		}
@@ -1451,26 +1453,28 @@ impl ImportBlock for Client {
 		}
 
 		let raw = if self.importer.block_queue.is_empty() {
-			Some((
-				unverified.bytes.clone(),
-				unverified.header.hash(),
-				*unverified.header.difficulty(),
-			))
-		} else { None };
+			Some((unverified.bytes.clone(), *unverified.header.difficulty()))
+		} else {
+			None
+		};
 
 		match self.importer.block_queue.import(unverified) {
 			Ok(hash) => {
-				if let Some((raw, hash, difficulty)) = raw {
-					self.notify(move |n| n.block_pre_import(&raw, &hash, &difficulty));
+				if let Some((bytes, difficulty)) = raw {
+					self.notify(move |n| n.block_pre_import(&bytes, &hash, &difficulty));
 				}
 				Ok(hash)
 			},
 			// we only care about block errors (not import errors)
-			Err((block, EthcoreError::Block(err))) => {
-				self.importer.bad_blocks.report(block.bytes, format!("{:?}", err));
-				return Err(EthcoreError::Block(err))
+			Err((EthcoreError::Block(e), Some(input))) => {
+				self.importer.bad_blocks.report(input.bytes, e.to_string());
+				Err(EthcoreError::Block(e))
 			},
-			Err((_, e)) => Err(e),
+			Err((EthcoreError::Block(e), None)) => {
+				error!(target: "client", "BlockError {} detected but it was missing raw_bytes of the block", e);
+				Err(EthcoreError::Block(e))
+			}
+			Err((e, _input)) => Err(e),
 		}
 	}
 
@@ -1498,10 +1502,10 @@ impl Call for Client {
 	fn call(&self, transaction: &SignedTransaction, analytics: CallAnalytics, state: &mut Self::State, header: &Header) -> Result<Executed, CallError> {
 		let env_info = EnvInfo {
 			number: header.number(),
-			author: header.author().clone(),
+			author: *header.author(),
 			timestamp: header.timestamp(),
-			difficulty: header.difficulty().clone(),
-			last_hashes: self.build_last_hashes(header.parent_hash()),
+			difficulty: *header.difficulty(),
+			last_hashes: self.build_last_hashes(*header.parent_hash()),
 			gas_used: U256::default(),
 			gas_limit: U256::max_value(),
 		};
@@ -1513,10 +1517,10 @@ impl Call for Client {
 	fn call_many(&self, transactions: &[(SignedTransaction, CallAnalytics)], state: &mut Self::State, header: &Header) -> Result<Vec<Executed>, CallError> {
 		let mut env_info = EnvInfo {
 			number: header.number(),
-			author: header.author().clone(),
+			author: *header.author(),
 			timestamp: header.timestamp(),
-			difficulty: header.difficulty().clone(),
-			last_hashes: self.build_last_hashes(header.parent_hash()),
+			difficulty: *header.difficulty(),
+			last_hashes: self.build_last_hashes(*header.parent_hash()),
 			gas_used: U256::default(),
 			gas_limit: U256::max_value(),
 		};
@@ -1540,10 +1544,10 @@ impl Call for Client {
 
 			let env_info = EnvInfo {
 				number: header.number(),
-				author: header.author().clone(),
+				author: *header.author(),
 				timestamp: header.timestamp(),
-				difficulty: header.difficulty().clone(),
-				last_hashes: self.build_last_hashes(header.parent_hash()),
+				difficulty: *header.difficulty(),
+				last_hashes: self.build_last_hashes(*header.parent_hash()),
 				gas_used: U256::default(),
 				gas_limit: max,
 			};
@@ -1635,7 +1639,7 @@ impl BlockChainClient for Client {
 		let address = self.transaction_address(id).ok_or_else(|| CallError::TransactionNotFound)?;
 		let block = BlockId::Hash(address.block_hash);
 
-		const PROOF: &'static str = "The transaction address contains a valid index within block; qed";
+		const PROOF: &str = "The transaction address contains a valid index within block; qed";
 		Ok(self.replay_block_transactions(block, analytics)?.nth(address.index).expect(PROOF).1)
 	}
 
@@ -1646,8 +1650,8 @@ impl BlockChainClient for Client {
 		let txs = body.transactions();
 		let engine = self.engine.clone();
 
-		const PROOF: &'static str = "Transactions fetched from blockchain; blockchain transactions are valid; qed";
-		const EXECUTE_PROOF: &'static str = "Transaction replayed; qed";
+		const PROOF: &str = "Transactions fetched from blockchain; blockchain transactions are valid; qed";
+		const EXECUTE_PROOF: &str = "Transaction replayed; qed";
 
 		Ok(Box::new(txs.into_iter()
 			.map(move |t| {
@@ -1661,9 +1665,7 @@ impl BlockChainClient for Client {
 	}
 
 	fn mode(&self) -> Mode {
-		let r = self.mode.lock().clone().into();
-		trace!(target: "mode", "Asked for mode = {:?}. returning {:?}", &*self.mode.lock(), r);
-		r
+		self.mode.lock().clone()
 	}
 
 	fn queue_info(&self) -> BlockQueueInfo {
@@ -1683,7 +1685,7 @@ impl BlockChainClient for Client {
 		}
 		{
 			let mut mode = self.mode.lock();
-			*mode = new_mode.clone().into();
+			*mode = new_mode.clone();
 			trace!(target: "mode", "Mode now {:?}", &*mode);
 			if let Some(ref mut f) = *self.on_user_defaults_change.lock() {
 				trace!(target: "mode", "Making callback...");
@@ -1973,17 +1975,17 @@ impl BlockChainClient for Client {
 			// pending logs themselves).
 			let from = match self.block_number_ref(&filter.from_block) {
 				Some(val) if val <= chain.best_block_number() => val,
-				_ => return Err(filter.from_block.clone()),
+				_ => return Err(filter.from_block),
 			};
 			let to = match self.block_number_ref(&filter.to_block) {
 				Some(val) if val <= chain.best_block_number() => val,
-				_ => return Err(filter.to_block.clone()),
+				_ => return Err(filter.to_block),
 			};
 
 			// If from is greater than to, then the current bloom filter behavior is to just return empty
 			// result. There's no point to continue here.
 			if from > to {
-				return Err(filter.to_block.clone());
+				return Err(filter.to_block);
 			}
 
 			chain.blocks_with_bloom(&filter.bloom_possibilities(), from, to)
@@ -1994,7 +1996,7 @@ impl BlockChainClient for Client {
 			// Otherwise, we use a slower version that finds a link between from_block and to_block.
 			let from_hash = match Self::block_hash(&chain, filter.from_block) {
 				Some(val) => val,
-				None => return Err(filter.from_block.clone()),
+				None => return Err(filter.from_block),
 			};
 			let from_number = match chain.block_number(&from_hash) {
 				Some(val) => val,
@@ -2002,7 +2004,7 @@ impl BlockChainClient for Client {
 			};
 			let to_hash = match Self::block_hash(&chain, filter.to_block) {
 				Some(val) => val,
-				None => return Err(filter.to_block.clone()),
+				None => return Err(filter.to_block),
 			};
 
 			let blooms = filter.bloom_possibilities();
@@ -2104,7 +2106,7 @@ impl BlockChainClient for Client {
 	}
 
 	fn last_hashes(&self) -> LastHashes {
-		(*self.build_last_hashes(&self.chain.read().best_block_hash())).clone()
+		self.build_last_hashes(self.chain.read().best_block_hash()).to_vec()
 	}
 
 	fn transactions_to_propagate(&self) -> Vec<Arc<VerifiedTransaction>> {
@@ -2154,29 +2156,35 @@ impl BlockChainClient for Client {
 		}
 	}
 
-	fn transact_contract(&self, address: Address, data: Bytes) -> Result<(), transaction::Error> {
+	fn create_transaction(&self, TransactionRequest { action, data, gas, gas_price, nonce }: TransactionRequest)
+		-> Result<SignedTransaction, transaction::Error>
+	{
 		let authoring_params = self.importer.miner.authoring_params();
 		let service_transaction_checker = self.importer.miner.service_transaction_checker();
 		let gas_price = if let Some(checker) = service_transaction_checker {
 			match checker.check_address(self, authoring_params.author) {
 				Ok(true) => U256::zero(),
-				_ => self.importer.miner.sensible_gas_price(),
+				_ => gas_price.unwrap_or_else(|| self.importer.miner.sensible_gas_price()),
 			}
 		} else {
 			self.importer.miner.sensible_gas_price()
 		};
 		let transaction = transaction::Transaction {
-			nonce: self.latest_nonce(&authoring_params.author),
-			action: Action::Call(address),
-			gas: self.importer.miner.sensible_gas_limit(),
+			nonce: nonce.unwrap_or_else(|| self.latest_nonce(&authoring_params.author)),
+			action,
+			gas: gas.unwrap_or_else(|| self.importer.miner.sensible_gas_limit()),
 			gas_price,
 			value: U256::zero(),
-			data: data,
+			data,
 		};
 		let chain_id = self.engine.signing_chain_id(&self.latest_env_info());
 		let signature = self.engine.sign(transaction.hash(chain_id))
 			.map_err(|e| transaction::Error::InvalidSignature(e.to_string()))?;
-		let signed = SignedTransaction::new(transaction.with_signature(signature, chain_id))?;
+		Ok(SignedTransaction::new(transaction.with_signature(signature, chain_id))?)
+	}
+
+	fn transact(&self, tx_request: TransactionRequest) -> Result<(), transaction::Error> {
+		let signed = self.create_transaction(tx_request)?;
 		self.importer.miner.import_own_transaction(self, signed.into())
 	}
 }
@@ -2333,7 +2341,7 @@ impl PrepareOpenBlock for Client {
 			self.tracedb.read().tracing_enabled(),
 			self.state_db.read().boxed_clone_canon(&h),
 			&best_header,
-			self.build_last_hashes(&h),
+			self.build_last_hashes(h),
 			author,
 			gas_range_target,
 			extra_data,
@@ -2346,7 +2354,7 @@ impl PrepareOpenBlock for Client {
 			.unwrap_or_else(Vec::new)
 			.into_iter()
 			.take(engine.maximum_uncle_count(open_block.header.number()))
-			.foreach(|h| {
+			.for_each(|h| {
 				open_block.push_uncle(h.decode().expect("decoding failure")).expect("pushing maximum_uncle_count;
 												open_block was just created;
 												push_uncle is not ok only if more than maximum_uncle_count is pushed;
@@ -2383,7 +2391,7 @@ impl ImportSealedBlock for Client {
 					block.rlp_bytes(),
 					format!("Detected an issue with locally sealed block: {}", e),
 				);
-				return Err(e.into());
+				return Err(e);
 			}
 
 			// scope for self.import_lock
@@ -2512,12 +2520,12 @@ impl ProvingBlockChainClient for Client {
 			_ => return None,
 		};
 
-		env_info.gas_limit = transaction.gas.clone();
+		env_info.gas_limit = transaction.gas;
 		let mut jdb = self.state_db.read().journal_db().boxed_clone();
 
 		executive_state::prove_transaction_virtual(
 			jdb.as_hash_db_mut(),
-			header.state_root().clone(),
+			header.state_root(),
 			&transaction,
 			self.engine.machine(),
 			&env_info,
@@ -2753,12 +2761,12 @@ fn transaction_receipt(
 		from: sender,
 		to: match tx.action {
 				Action::Create => None,
-				Action::Call(ref address) => Some(address.clone().into())
+				Action::Call(ref address) => Some(*address)
 		},
-		transaction_hash: transaction_hash,
-		transaction_index: transaction_index,
-		block_hash: block_hash,
-		block_number: block_number,
+		transaction_hash,
+		transaction_index,
+		block_hash,
+		block_number,
 		cumulative_gas_used: receipt.gas_used,
 		gas_used: receipt.gas_used - prior_gas_used,
 		contract_address: match tx.action {
@@ -2767,10 +2775,10 @@ fn transaction_receipt(
 		},
 		logs: receipt.logs.into_iter().enumerate().map(|(i, log)| LocalizedLogEntry {
 			entry: log,
-			block_hash: block_hash,
-			block_number: block_number,
-			transaction_hash: transaction_hash,
-			transaction_index: transaction_index,
+			block_hash,
+			block_number,
+			transaction_hash,
+			transaction_index,
 			transaction_log_index: i,
 			log_index: prior_no_of_logs + i,
 		}).collect(),
@@ -2916,8 +2924,8 @@ mod tests {
 		let tx1 = raw_tx.clone().sign(secret, None);
 		let transaction = LocalizedTransaction {
 			signed: tx1.clone().into(),
-			block_number: block_number,
-			block_hash: block_hash,
+			block_number,
+			block_hash,
 			transaction_index: 1,
 			cached_sender: Some(tx1.sender()),
 		};
@@ -2932,7 +2940,7 @@ mod tests {
 		}];
 		let receipt = Receipt {
 			outcome: TransactionOutcome::StateRoot(state_root),
-			gas_used: gas_used,
+			gas_used,
 			log_bloom: Default::default(),
 			logs: logs.clone(),
 		};
@@ -2978,7 +2986,7 @@ mod tests {
 
 	#[test]
 	fn should_mark_finalization_correctly_for_parent() {
-		let client = generate_dummy_client_with_spec_and_data(spec::new_test_with_finality, 2, 0, &[]);
+		let client = generate_dummy_client_with_spec_and_data(spec::new_test_with_finality, 2, 0, &[], false);
 		let chain = client.chain();
 
 		let block1_details = chain.block_hash(1).and_then(|h| chain.block_details(&h));

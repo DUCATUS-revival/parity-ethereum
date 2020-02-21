@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -120,7 +120,7 @@ extern crate pretty_assertions;
 
 #[cfg(test)]
 #[macro_use]
-extern crate macros;
+extern crate maplit;
 
 #[cfg(test)]
 extern crate fake_fetch;

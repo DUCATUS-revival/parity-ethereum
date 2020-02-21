@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -26,7 +26,7 @@ use rlp::RlpStream;
 use log::trace;
 
 use account_state::{Backend as StateBackend, State, CleanupMode};
-use evm::{CallType, Finalize, FinalizationResult};
+use evm::{ActionType, Finalize, FinalizationResult};
 use vm::{
 	self, EnvInfo, CreateContractAddress, ReturnData, CleanDustMode, ActionParams,
 	ActionValue, Schedule, TrapError, ResumeCall, ResumeCreate
@@ -241,7 +241,7 @@ impl<'a> CallCreateExecutive<'a> {
 		trace!("Executive::call(params={:?}) self.env_info={:?}, parent_static={}", params, info, parent_static_flag);
 
 		let gas = params.gas;
-		let static_flag = parent_static_flag || params.call_type == CallType::StaticCall;
+		let static_flag = parent_static_flag || params.action_type == ActionType::StaticCall;
 
 		// if destination is builtin, try to execute it
 		let kind = if let Some(builtin) = machine.builtin(&params.code_address, info.number) {
@@ -298,7 +298,7 @@ impl<'a> CallCreateExecutive<'a> {
 			}
 		} else {
 			if (static_flag &&
-				(params.call_type == CallType::StaticCall || params.call_type == CallType::Call)) &&
+				(params.action_type == ActionType::StaticCall || params.action_type == ActionType::Call)) &&
 				params.value.value() > U256::zero()
 			{
 				return Err(vm::Error::MutableCallInStaticContext);
@@ -851,7 +851,7 @@ impl<'a, B: 'a + StateBackend> Executive<'a, B> {
 			return Err(ExecutionError::NotEnoughBaseGas { required: base_gas_required, got: t.gas });
 		}
 
-		if !t.is_unsigned() && check_nonce && schedule.kill_dust != CleanDustMode::Off && !self.state.exists(&sender)? {
+		if check_nonce && schedule.kill_dust != CleanDustMode::Off && !self.state.exists(&sender)? {
 			return Err(ExecutionError::SenderMustExist);
 		}
 
@@ -884,10 +884,8 @@ impl<'a, B: 'a + StateBackend> Executive<'a, B> {
 
 		let mut substate = Substate::new();
 
-		// NOTE: there can be no invalid transactions from this point.
-		if !schedule.keep_unsigned_nonce || !t.is_unsigned() {
-			self.state.inc_nonce(&sender)?;
-		}
+		self.state.inc_nonce(&sender)?;
+
 		self.state.sub_balance(
 			&sender,
 			&U256::try_from(gas_cost).expect("Total cost (value + gas_cost) is lower than max allowed balance (U256); gas_cost has to fit U256; qed"),
@@ -909,7 +907,7 @@ impl<'a, B: 'a + StateBackend> Executive<'a, B> {
 					code: Some(Arc::new(t.data.clone())),
 					code_version: schedule.latest_version,
 					data: None,
-					call_type: CallType::None,
+					action_type: ActionType::Create,
 					params_type: vm::ParamsType::Embedded,
 				};
 				let res = self.create(params, &mut substate, &mut tracer, &mut vm_tracer);
@@ -932,7 +930,7 @@ impl<'a, B: 'a + StateBackend> Executive<'a, B> {
 					code_hash: self.state.code_hash(address)?,
 					code_version: self.state.code_version(address)?,
 					data: Some(t.data.clone()),
-					call_type: CallType::Call,
+					action_type: ActionType::Call,
 					params_type: vm::ParamsType::Separate,
 				};
 				let res = self.call(params, &mut substate, &mut tracer, &mut vm_tracer);
@@ -1235,8 +1233,7 @@ mod tests {
 	};
 	use parity_crypto::publickey::{Generator, Random};
 	use evm::{Factory, evm_test, evm_test_ignore};
-	use macros::vec_into;
-	use vm::{ActionParams, ActionValue, CallType, EnvInfo, CreateContractAddress};
+	use vm::{ActionParams, ActionValue, EnvInfo, CreateContractAddress};
 	use ::trace::{
 		trace,
 		FlatTrace, Tracer, NoopTracer, ExecutiveTracer,
@@ -1414,7 +1411,7 @@ mod tests {
 		params.gas = U256::from(100_000);
 		params.code = Some(Arc::new(code));
 		params.value = ActionValue::Transfer(U256::from(100));
-		params.call_type = CallType::Call;
+		params.action_type = ActionType::Call;
 		let mut state = get_temp_state();
 		state.add_balance(&sender, &U256::from(100), CleanupMode::NoEmpty).unwrap();
 		let info = EnvInfo::default();
@@ -1434,7 +1431,7 @@ mod tests {
 				value: 100.into(),
 				gas: 100_000.into(),
 				input: vec![],
-				call_type: CallType::Call
+				call_type: Some(trace::CallType::Call).into(),
 			}),
 			result: trace::Res::Call(trace::CallResult {
 				gas_used: 33021.into(),
@@ -1449,7 +1446,7 @@ mod tests {
 				value: 1.into(),
 				gas: 66560.into(),
 				input: vec![],
-				call_type: CallType::Call
+				call_type: Some(trace::CallType::Call).into(),
 			}), result: trace::Res::Call(trace::CallResult {
 				gas_used: 600.into(),
 				output: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 156, 17, 133, 165, 197, 233, 252, 84, 97, 40, 8, 151, 126, 232, 245, 72, 178, 37, 141, 49]
@@ -1498,7 +1495,7 @@ mod tests {
 		params.gas = U256::from(100_000);
 		params.code = Some(Arc::new(code));
 		params.value = ActionValue::Transfer(U256::from(100));
-		params.call_type = CallType::Call;
+		params.action_type = ActionType::Call;
 		let mut state = get_temp_state();
 		state.add_balance(&sender, &U256::from(100), CleanupMode::NoEmpty).unwrap();
 		let info = EnvInfo::default();
@@ -1524,7 +1521,7 @@ mod tests {
 				value: 100.into(),
 				gas: 100000.into(),
 				input: vec![],
-				call_type: CallType::Call,
+				call_type: Some(trace::CallType::Call).into(),
 			}),
 			result: trace::Res::Call(trace::CallResult {
 				gas_used: U256::from(55_248),
@@ -1537,7 +1534,8 @@ mod tests {
 				from: Address::from_str("b010143a42d5980c7e5ef0e4a4416dc098a4fed3").unwrap(),
 				value: 23.into(),
 				gas: 67979.into(),
-				init: vec![96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85]
+				init: vec![96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85],
+				creation_method: Some(trace::CreationMethod::Create),
 			}),
 			result: trace::Res::Create(trace::CreateResult {
 				gas_used: U256::from(3224),
@@ -1552,28 +1550,28 @@ mod tests {
 			parent_step: 0,
 			code: vec![124, 96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85, 96, 0, 82, 96, 29, 96, 3, 96, 23, 240, 96, 0, 85],
 			operations: vec![
-				VMOperation { pc: 0, instruction: 124, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99997.into(), stack_push: vec_into![U256::from_dec_str("2589892687202724018173567190521546555304938078595079151649957320078677").unwrap()], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 30, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99994.into(), stack_push: vec_into![0], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 32, instruction: 82, gas_cost: 6.into(), executed: Some(VMExecutedOperation { gas_used: 99988.into(), stack_push: vec_into![], mem_diff: Some(MemoryDiff { offset: 0, data: vec![0, 0, 0, 96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85] }), store_diff: None }) },
-				VMOperation { pc: 33, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99985.into(), stack_push: vec_into![29], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 35, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99982.into(), stack_push: vec_into![3], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 37, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99979.into(), stack_push: vec_into![23], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 39, instruction: 240, gas_cost: 99979.into(), executed: Some(VMExecutedOperation { gas_used: 64755.into(), stack_push: vec_into![U256::from_dec_str("1135198453258042933984631383966629874710669425204").unwrap()], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 40, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 64752.into(), stack_push: vec_into![0], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 42, instruction: 85, gas_cost: 20000.into(), executed: Some(VMExecutedOperation { gas_used: 44752.into(), stack_push: vec_into![], mem_diff: None, store_diff: Some(StorageDiff { location: 0.into(), value: U256::from_dec_str("1135198453258042933984631383966629874710669425204").unwrap() }) }) }
+				VMOperation { pc: 0, instruction: 124, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99997.into(), stack_push: vec![U256::from_dec_str("2589892687202724018173567190521546555304938078595079151649957320078677").unwrap()], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 30, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99994.into(), stack_push: vec![U256::from(0)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 32, instruction: 82, gas_cost: 6.into(), executed: Some(VMExecutedOperation { gas_used: 99988.into(), stack_push: vec![], mem_diff: Some(MemoryDiff { offset: 0, data: vec![0, 0, 0, 96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85] }), store_diff: None }) },
+				VMOperation { pc: 33, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99985.into(), stack_push: vec![U256::from(29)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 35, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99982.into(), stack_push: vec![U256::from(3)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 37, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99979.into(), stack_push: vec![U256::from(23)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 39, instruction: 240, gas_cost: 99979.into(), executed: Some(VMExecutedOperation { gas_used: 64755.into(), stack_push: vec![U256::from_dec_str("1135198453258042933984631383966629874710669425204").unwrap()], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 40, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 64752.into(), stack_push: vec![U256::from(0)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 42, instruction: 85, gas_cost: 20000.into(), executed: Some(VMExecutedOperation { gas_used: 44752.into(), stack_push: vec![], mem_diff: None, store_diff: Some(StorageDiff { location: 0.into(), value: U256::from_dec_str("1135198453258042933984631383966629874710669425204").unwrap() }) }) }
 			],
 			subs: vec![
 				VMTrace {
 					parent_step: 6,
 					code: vec![96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85],
 					operations: vec![
-						VMOperation { pc: 0, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67976.into(), stack_push: vec_into![16], mem_diff: None, store_diff: None }) },
-						VMOperation { pc: 2, instruction: 128, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67973.into(), stack_push: vec_into![16, 16], mem_diff: None, store_diff: None }) },
-						VMOperation { pc: 3, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67970.into(), stack_push: vec_into![12], mem_diff: None, store_diff: None }) },
-						VMOperation { pc: 5, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67967.into(), stack_push: vec_into![0], mem_diff: None, store_diff: None }) },
-						VMOperation { pc: 7, instruction: 57, gas_cost: 9.into(), executed: Some(VMExecutedOperation { gas_used: 67958.into(), stack_push: vec_into![], mem_diff: Some(MemoryDiff { offset: 0, data: vec![96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53] }), store_diff: None }) },
-						VMOperation { pc: 8, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67955.into(), stack_push: vec_into![0], mem_diff: None, store_diff: None }) },
-						VMOperation { pc: 10, instruction: 243, gas_cost: 0.into(), executed: Some(VMExecutedOperation { gas_used: 67955.into(), stack_push: vec_into![], mem_diff: None, store_diff: None }) }
+						VMOperation { pc: 0, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67976.into(), stack_push: vec![U256::from(16)], mem_diff: None, store_diff: None }) },
+						VMOperation { pc: 2, instruction: 128, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67973.into(), stack_push: vec![U256::from(16); 2], mem_diff: None, store_diff: None }) },
+						VMOperation { pc: 3, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67970.into(), stack_push: vec![U256::from(12)], mem_diff: None, store_diff: None }) },
+						VMOperation { pc: 5, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67967.into(), stack_push: vec![U256::from(0)], mem_diff: None, store_diff: None }) },
+						VMOperation { pc: 7, instruction: 57, gas_cost: 9.into(), executed: Some(VMExecutedOperation { gas_used: 67958.into(), stack_push: vec![], mem_diff: Some(MemoryDiff { offset: 0, data: vec![96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53] }), store_diff: None }) },
+						VMOperation { pc: 8, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 67955.into(), stack_push: vec![U256::from(0)], mem_diff: None, store_diff: None }) },
+						VMOperation { pc: 10, instruction: 243, gas_cost: 0.into(), executed: Some(VMExecutedOperation { gas_used: 67955.into(), stack_push: vec![], mem_diff: None, store_diff: None }) }
 					],
 					subs: vec![]
 				}
@@ -1614,7 +1612,7 @@ mod tests {
 		params.gas = U256::from(100_000);
 		params.code = Some(Arc::new(code));
 		params.value = ActionValue::Transfer(U256::from(100));
-		params.call_type = CallType::Call;
+		params.action_type = ActionType::Call;
 		let mut state = get_temp_state();
 		state.add_balance(&sender, &U256::from(100), CleanupMode::NoEmpty).unwrap();
 		let info = EnvInfo::default();
@@ -1640,7 +1638,7 @@ mod tests {
 				value: 100.into(),
 				gas: 100_000.into(),
 				input: vec![],
-				call_type: CallType::Call,
+				call_type: Some(trace::CallType::Call).into(),
 			}),
 			result: trace::Res::Call(trace::CallResult {
 				gas_used: U256::from(37_033),
@@ -1653,7 +1651,8 @@ mod tests {
 				from: Address::from_str("b010143a42d5980c7e5ef0e4a4416dc098a4fed3").unwrap(),
 				value: 23.into(),
 				gas: 66_917.into(),
-				init: vec![0x60, 0x01, 0x60, 0x00, 0xfd]
+				init: vec![0x60, 0x01, 0x60, 0x00, 0xfd],
+				creation_method: Some(trace::CreationMethod::Create),
 			}),
 			result: trace::Res::FailedCreate(vm::Error::Reverted.into()),
 		}];
@@ -1711,6 +1710,7 @@ mod tests {
 				value: 100.into(),
 				gas: params.gas,
 				init: vec![96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85],
+				creation_method: Some(trace::CreationMethod::Create),
 			}),
 			result: trace::Res::Create(trace::CreateResult {
 				gas_used: U256::from(3224),
@@ -1725,13 +1725,13 @@ mod tests {
 			parent_step: 0,
 			code: vec![96, 16, 128, 96, 12, 96, 0, 57, 96, 0, 243, 0, 96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53, 85],
 			operations: vec![
-				VMOperation { pc: 0, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99997.into(), stack_push: vec_into![16], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 2, instruction: 128, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99994.into(), stack_push: vec_into![16, 16], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 3, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99991.into(), stack_push: vec_into![12], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 5, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99988.into(), stack_push: vec_into![0], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 7, instruction: 57, gas_cost: 9.into(), executed: Some(VMExecutedOperation { gas_used: 99979.into(), stack_push: vec_into![], mem_diff: Some(MemoryDiff { offset: 0, data: vec![96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53] }), store_diff: None }) },
-				VMOperation { pc: 8, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99976.into(), stack_push: vec_into![0], mem_diff: None, store_diff: None }) },
-				VMOperation { pc: 10, instruction: 243, gas_cost: 0.into(), executed: Some(VMExecutedOperation { gas_used: 99976.into(), stack_push: vec_into![], mem_diff: None, store_diff: None }) }
+				VMOperation { pc: 0, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99997.into(), stack_push: vec![U256::from(16)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 2, instruction: 128, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99994.into(), stack_push: vec![U256::from(16); 2], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 3, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99991.into(), stack_push: vec![U256::from(12)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 5, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99988.into(), stack_push: vec![U256::from(0)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 7, instruction: 57, gas_cost: 9.into(), executed: Some(VMExecutedOperation { gas_used: 99979.into(), stack_push: vec![], mem_diff: Some(MemoryDiff { offset: 0, data: vec![96, 0, 53, 84, 21, 96, 9, 87, 0, 91, 96, 32, 53, 96, 0, 53] }), store_diff: None }) },
+				VMOperation { pc: 8, instruction: 96, gas_cost: 3.into(), executed: Some(VMExecutedOperation { gas_used: 99976.into(), stack_push: vec![U256::from(0)], mem_diff: None, store_diff: None }) },
+				VMOperation { pc: 10, instruction: 243, gas_cost: 0.into(), executed: Some(VMExecutedOperation { gas_used: 99976.into(), stack_push: vec![], mem_diff: None, store_diff: None }) }
 			],
 			subs: vec![]
 		};
@@ -1960,7 +1960,7 @@ mod tests {
 	// TODO: fix (preferred) or remove
 	evm_test_ignore!{test_transact_simple: test_transact_simple_int}
 	fn test_transact_simple(factory: Factory) {
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let t = Transaction {
 			action: Action::Create,
 			value: U256::from(17),
@@ -1999,7 +1999,7 @@ mod tests {
 
 	evm_test!{test_transact_invalid_nonce: test_transact_invalid_nonce_int}
 	fn test_transact_invalid_nonce(factory: Factory) {
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let t = Transaction {
 			action: Action::Create,
 			value: U256::from(17),
@@ -2032,7 +2032,7 @@ mod tests {
 
 	evm_test!{test_transact_gas_limit_reached: test_transact_gas_limit_reached_int}
 	fn test_transact_gas_limit_reached(factory: Factory) {
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let t = Transaction {
 			action: Action::Create,
 			value: U256::from(17),
@@ -2067,7 +2067,7 @@ mod tests {
 	evm_test!{test_not_enough_cash: test_not_enough_cash_int}
 	fn test_not_enough_cash(factory: Factory) {
 
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let t = Transaction {
 			action: Action::Create,
 			value: U256::from(18),

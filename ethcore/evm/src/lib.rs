@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -47,7 +47,7 @@ mod instructions;
 mod tests;
 
 pub use vm::{
-    Schedule, CleanDustMode, EnvInfo, CallType, ActionParams, Ext,
+    Schedule, CleanDustMode, EnvInfo, ActionType, ActionParams, Ext,
     ContractCreateResult, MessageCallResult, CreateContractAddress,
     GasLeft, ReturnData
 };

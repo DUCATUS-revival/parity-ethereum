@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -15,9 +15,6 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Block verification utilities.
-
-// The MallocSizeOf derive looks for this in the root
-use parity_util_mem as malloc_size_of;
 
 #[cfg(feature = "bench" )]
 pub mod verification;

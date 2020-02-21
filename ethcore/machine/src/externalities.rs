@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -24,12 +24,11 @@ use log::{debug, trace, warn};
 
 use account_state::{Backend as StateBackend, State, CleanupMode};
 use common_types::{
-	transaction::UNSIGNED_SENDER,
 	log_entry::LogEntry,
 };
 use trace::{Tracer, VMTracer};
 use vm::{
-	self, ActionParams, ActionValue, EnvInfo, CallType, Schedule,
+	self, ActionParams, ActionValue, EnvInfo, ActionType, Schedule,
 	Ext, ContractCreateResult, MessageCallResult, CreateContractAddress,
 	ReturnData, TrapKind
 };
@@ -193,7 +192,7 @@ impl<'a, T: 'a, V: 'a, B: 'a> Ext for Externalities<'a, T, V, B>
 				code_hash,
 				code_version,
 				data: Some(data.as_bytes().to_vec()),
-				call_type: CallType::Call,
+				action_type: ActionType::Call,
 				params_type: vm::ParamsType::Separate,
 			};
 
@@ -241,6 +240,12 @@ impl<'a, T: 'a, V: 'a, B: 'a> Ext for Externalities<'a, T, V, B>
 			}
 		};
 
+		let create_type = match address_scheme {
+			CreateContractAddress::FromSenderAndNonce => ActionType::Create,
+			CreateContractAddress::FromSenderSaltAndCodeHash(_) => ActionType::Create2,
+			CreateContractAddress::FromSenderAndCodeHash => ActionType::Create2,
+		};
+
 		// prepare the params
 		let params = ActionParams {
 			code_address: address.clone(),
@@ -254,16 +259,14 @@ impl<'a, T: 'a, V: 'a, B: 'a> Ext for Externalities<'a, T, V, B>
 			code_hash,
 			code_version: *parent_version,
 			data: None,
-			call_type: CallType::None,
+			action_type: create_type,
 			params_type: vm::ParamsType::Embedded,
 		};
 
 		if !self.static_flag {
-			if !self.schedule.keep_unsigned_nonce || params.sender != UNSIGNED_SENDER {
-				if let Err(e) = self.state.inc_nonce(&self.origin_info.address) {
-					debug!(target: "ext", "Database corruption encountered: {:?}", e);
-					return Ok(ContractCreateResult::Failed)
-				}
+			if let Err(e) = self.state.inc_nonce(&self.origin_info.address) {
+				warn!(target: "ext", "Database corruption encountered: {:?}", e);
+				return Ok(ContractCreateResult::Failed)
 			}
 		}
 
@@ -285,7 +288,7 @@ impl<'a, T: 'a, V: 'a, B: 'a> Ext for Externalities<'a, T, V, B>
 		value: Option<U256>,
 		data: &[u8],
 		code_address: &Address,
-		call_type: CallType,
+		call_type: ActionType,
 		trap: bool,
 	) -> ::std::result::Result<MessageCallResult, TrapKind> {
 		trace!(target: "externalities", "call");
@@ -311,7 +314,7 @@ impl<'a, T: 'a, V: 'a, B: 'a> Ext for Externalities<'a, T, V, B>
 			code_hash,
 			code_version,
 			data: Some(data.to_vec()),
-			call_type,
+			action_type: call_type,
 			params_type: vm::ParamsType::Separate,
 		};
 
@@ -457,7 +460,7 @@ impl<'a, T: 'a, V: 'a, B: 'a> Ext for Externalities<'a, T, V, B>
 mod tests {
 	use std::str::FromStr;
 	use ethereum_types::{U256, Address};
-	use evm::{EnvInfo, Ext, CallType};
+	use evm::{EnvInfo, Ext, ActionType};
 	use account_state::State;
 	use ethcore::test_helpers::get_temp_state;
 	use trace::{NoopTracer, NoopVMTracer};
@@ -591,7 +594,7 @@ mod tests {
 			Some("0000000000000000000000000000000000000000000000000000000000150000".parse::<U256>().unwrap()),
 			&[],
 			&Address::zero(),
-			CallType::Call,
+			ActionType::Call,
 			false,
 		).ok().unwrap();
 	}

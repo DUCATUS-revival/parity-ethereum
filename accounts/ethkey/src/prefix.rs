@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -24,19 +24,12 @@ pub struct Prefix {
 
 impl Prefix {
 	pub fn new(prefix: Vec<u8>, iterations: usize) -> Self {
-		Prefix {
-			prefix: prefix,
-			iterations: iterations,
-		}
+		Prefix { prefix, iterations }
 	}
-}
 
-impl Generator for Prefix {
-	type Error = Error;
-
-	fn generate(&mut self) -> Result<KeyPair, Error> {
+	pub fn generate(&mut self) -> Result<KeyPair, Error> {
 		for _ in 0..self.iterations {
-			let keypair = Random.generate()?;
+			let keypair = Random.generate();
 			if keypair.address().as_ref().starts_with(&self.prefix) {
 				return Ok(keypair)
 			}
@@ -49,7 +42,6 @@ impl Generator for Prefix {
 #[cfg(test)]
 mod tests {
 	use Prefix;
-	use parity_crypto::publickey::Generator;
 
 	#[test]
 	fn prefix_generator() {

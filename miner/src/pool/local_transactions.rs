@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -304,7 +304,7 @@ mod tests {
 	}
 
 	fn new_tx<T: Into<U256>>(nonce: T) -> Arc<Transaction> {
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let signed = transaction::Transaction {
 			action: transaction::Action::Create,
 			value: U256::from(100),

@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -107,7 +107,7 @@ pub trait NodeInfo: Send + Sync {
 
 /// Create a new local data store, given a database, a column to write to, and a node.
 /// Attempts to read data out of the store, and move it into the node.
-pub fn create<T: NodeInfo>(db: Arc<dyn KeyValueDB>, col: Option<u32>, node: T) -> LocalDataStore<T> {
+pub fn create<T: NodeInfo>(db: Arc<dyn KeyValueDB>, col: u32, node: T) -> LocalDataStore<T> {
 	LocalDataStore {
 		db,
 		col,
@@ -121,7 +121,7 @@ pub fn create<T: NodeInfo>(db: Arc<dyn KeyValueDB>, col: Option<u32>, node: T) -
 /// and the node security level.
 pub struct LocalDataStore<T: NodeInfo> {
 	db: Arc<dyn KeyValueDB>,
-	col: Option<u32>,
+	col: u32,
 	node: T,
 }
 
@@ -214,22 +214,22 @@ mod tests {
 
 	#[test]
 	fn twice_empty() {
-		let db = Arc::new(::kvdb_memorydb::create(0));
+		let db = Arc::new(::kvdb_memorydb::create(1));
 
 		{
-			let store = super::create(db.clone(), None, Dummy(vec![]));
+			let store = super::create(db.clone(), 0, Dummy(vec![]));
 			assert_eq!(store.pending_transactions().unwrap(), vec![])
 		}
 
 		{
-			let store = super::create(db.clone(), None, Dummy(vec![]));
+			let store = super::create(db.clone(), 0, Dummy(vec![]));
 			assert_eq!(store.pending_transactions().unwrap(), vec![])
 		}
 	}
 
 	#[test]
 	fn with_condition() {
-		let keypair = Brain::new("abcd".into()).generate().unwrap();
+		let keypair = Brain::new("abcd".into()).generate();
 		let transactions: Vec<_> = (0..10u64).map(|nonce| {
 			let mut tx = Transaction::default();
 			tx.nonce = nonce.into();
@@ -243,28 +243,28 @@ mod tests {
 			PendingTransaction::new(signed, condition)
 		}).collect();
 
-		let db = Arc::new(::kvdb_memorydb::create(0));
+		let db = Arc::new(::kvdb_memorydb::create(1));
 
 		{
 			// nothing written yet, will write pending.
-			let store = super::create(db.clone(), None, Dummy(transactions.clone()));
+			let store = super::create(db.clone(), 0, Dummy(transactions.clone()));
 			assert_eq!(store.pending_transactions().unwrap(), vec![])
 		}
 		{
 			// pending written, will write nothing.
-			let store = super::create(db.clone(), None, Dummy(vec![]));
+			let store = super::create(db.clone(), 0, Dummy(vec![]));
 			assert_eq!(store.pending_transactions().unwrap(), transactions)
 		}
 		{
 			// pending removed, will write nothing.
-			let store = super::create(db.clone(), None, Dummy(vec![]));
+			let store = super::create(db.clone(), 0, Dummy(vec![]));
 			assert_eq!(store.pending_transactions().unwrap(), vec![])
 		}
 	}
 
 	#[test]
 	fn skips_bad_transactions() {
-		let keypair = Brain::new("abcd".into()).generate().unwrap();
+		let keypair = Brain::new("abcd".into()).generate();
 		let mut transactions: Vec<_> = (0..10u64).map(|nonce| {
 			let mut tx = Transaction::default();
 			tx.nonce = nonce.into();
@@ -282,15 +282,15 @@ mod tests {
 			PendingTransaction::new(signed, None)
 		});
 
-		let db = Arc::new(::kvdb_memorydb::create(0));
+		let db = Arc::new(::kvdb_memorydb::create(1));
 		{
 			// nothing written, will write bad.
-			let store = super::create(db.clone(), None, Dummy(transactions.clone()));
+			let store = super::create(db.clone(), 0, Dummy(transactions.clone()));
 			assert_eq!(store.pending_transactions().unwrap(), vec![])
 		}
 		{
 			// try to load transactions. The last transaction, which is invalid, will be skipped.
-			let store = super::create(db.clone(), None, Dummy(vec![]));
+			let store = super::create(db.clone(), 0, Dummy(vec![]));
 			let loaded = store.pending_transactions().unwrap();
 			transactions.pop();
 			assert_eq!(loaded, transactions);

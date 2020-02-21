@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -40,23 +40,25 @@ use std::sync::{Weak, Arc};
 use std::time::{UNIX_EPOCH, Duration};
 use std::u64;
 
-use client_traits::{EngineClient, ForceUpdateSealing};
+use client_traits::{EngineClient, ForceUpdateSealing, TransactionRequest};
 use engine::{Engine, ConstructedVerifier};
+use block_gas_limit::block_gas_limit;
 use block_reward::{self, BlockRewardContract, RewardKind};
-use ethjson;
 use machine::{
 	ExecutedBlock,
 	Machine,
 };
-use macros::map;
 use keccak_hash::keccak;
 use log::{info, debug, error, trace, warn};
+use lru_cache::LruCache;
 use engine::signer::EngineSigner;
 use parity_crypto::publickey::Signature;
 use io::{IoContext, IoHandler, TimerToken, IoService};
 use itertools::{self, Itertools};
+use rand::rngs::OsRng;
 use rlp::{encode, Decodable, DecoderError, Encodable, RlpStream, Rlp};
 use ethereum_types::{H256, H520, Address, U128, U256};
+use parity_bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use time_utils::CheckedSystemTime;
 use common_types::{
@@ -72,13 +74,16 @@ use common_types::{
 		machine::{Call, AuxiliaryData},
 	},
 	errors::{BlockError, EthcoreError as Error, EngineError},
+	ids::BlockId,
 	snapshot::Snapshotting,
+	transaction::SignedTransaction,
 };
 use unexpected::{Mismatch, OutOfBounds};
-
-use validator_set::{ValidatorSet, SimpleList, new_validator_set};
+use validator_set::{ValidatorSet, SimpleList, new_validator_set_posdao};
 
 mod finality;
+mod randomness;
+pub(crate) mod util;
 
 use self::finality::RollingFinality;
 
@@ -117,9 +122,20 @@ pub struct AuthorityRoundParams {
 	pub maximum_empty_steps: usize,
 	/// Transition block to strict empty steps validation.
 	pub strict_empty_steps_transition: u64,
+	/// If set, enables random number contract integration. It maps the transition block to the contract address.
+	pub randomness_contract_address: BTreeMap<u64, Address>,
+	/// The addresses of contracts that determine the block gas limit with their associated block
+	/// numbers.
+	pub block_gas_limit_contract_transitions: BTreeMap<u64, Address>,
+	/// If set, this is the block number at which the consensus engine switches from AuRa to AuRa
+	/// with POSDAO modifications.
+	pub posdao_transition: Option<BlockNumber>,
 }
 
 const U16_MAX: usize = ::std::u16::MAX as usize;
+
+/// The number of recent block hashes for which the gas limit override is memoized.
+const GAS_LIMIT_OVERRIDE_CACHE_CAPACITY: usize = 10;
 
 impl From<ethjson::spec::AuthorityRoundParams> for AuthorityRoundParams {
 	fn from(p: ethjson::spec::AuthorityRoundParams) -> Self {
@@ -168,9 +184,20 @@ impl From<ethjson::spec::AuthorityRoundParams> for AuthorityRoundParams {
 				BlockRewardContract::new_from_address(address.into())
 			);
 		}
+		let randomness_contract_address = p.randomness_contract_address.map_or_else(BTreeMap::new, |transitions| {
+			transitions.into_iter().map(|(ethjson::uint::Uint(block), addr)| {
+				(block.as_u64(), addr.into())
+			}).collect()
+		});
+		let block_gas_limit_contract_transitions: BTreeMap<_, _> =
+			p.block_gas_limit_contract_transitions
+			.unwrap_or_default()
+			.into_iter()
+			.map(|(block_num, address)| (block_num.into(), address.into()))
+			.collect();
 		AuthorityRoundParams {
 			step_durations,
-			validators: new_validator_set(p.validators),
+			validators: new_validator_set_posdao(p.validators, p.posdao_transition.map(Into::into)),
 			start_step: p.start_step.map(Into::into),
 			validate_score_transition: p.validate_score_transition.map_or(0, Into::into),
 			validate_step_transition: p.validate_step_transition.map_or(0, Into::into),
@@ -183,12 +210,15 @@ impl From<ethjson::spec::AuthorityRoundParams> for AuthorityRoundParams {
 			maximum_empty_steps: p.maximum_empty_steps.map_or(0, Into::into),
 			two_thirds_majority_transition: p.two_thirds_majority_transition.map_or_else(BlockNumber::max_value, Into::into),
 			strict_empty_steps_transition: p.strict_empty_steps_transition.map_or(0, Into::into),
+			randomness_contract_address,
+			block_gas_limit_contract_transitions,
+			posdao_transition: p.posdao_transition.map(Into::into),
 		}
 	}
 }
 
 /// A triple containing the first step number and the starting timestamp of the given step duration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct StepDurationInfo {
 	transition_step: u64,
 	transition_timestamp: u64,
@@ -343,7 +373,6 @@ impl EpochManager {
 		debug!(target: "engine", "Zooming to epoch after block {}", hash);
 		trace!(target: "engine", "Current validator set: {:?}", self.validators());
 
-
 		// epoch_transition_for can be an expensive call, but in the absence of
 		// forks it will only need to be called for the block directly after
 		// epoch transition, in which case it will be O(1) and require a single
@@ -363,25 +392,27 @@ impl EpochManager {
 			let (signal_number, set_proof, _) = destructure_proofs(&last_transition.proof)
 				.expect("proof produced by this engine; therefore it is valid; qed");
 
-			trace!(target: "engine", "extracting epoch validator set for epoch ({}, {}) signalled at #{}",
-				last_transition.block_number, last_transition.block_hash, signal_number);
+			trace!(
+				target: "engine",
+				"extracting epoch validator set for epoch ({}, {}) signalled at #{}",
+				last_transition.block_number, last_transition.block_hash, signal_number
+			);
 
 			let first = signal_number == 0;
-			let epoch_set = validators.epoch_set(
+			let (list, _) = validators.epoch_set(
 				first,
 				machine,
 				signal_number, // use signal number so multi-set first calculation is correct.
 				set_proof,
-			)
-				.ok()
-				.map(|(list, _)| {
-					trace!(target: "engine", "Updating finality checker with new validator set extracted from epoch ({}, {}): {:?}",
-						last_transition.block_number, last_transition.block_hash, &list);
+			).expect("proof produced by this engine; therefore it is valid; qed");
 
-					list.into_inner()
-				})
-				.expect("proof produced by this engine; therefore it is valid; qed");
+			trace!(
+				target: "engine",
+				"Updating finality checker with new validator set extracted from epoch ({}, {}): {:?}",
+				last_transition.block_number, last_transition.block_hash, &list
+			);
 
+			let epoch_set = list.into_inner();
 			let two_thirds_majority_transition = self.finality_checker.two_thirds_majority_transition();
 			self.finality_checker = RollingFinality::blank(epoch_set, two_thirds_majority_transition);
 		}
@@ -408,10 +439,22 @@ impl EpochManager {
 /// A message broadcast by authorities when it's their turn to seal a block but there are no
 /// transactions. Other authorities accumulate these messages and later include them in the seal as
 /// proof.
+///
+/// An empty step message is created _instead of_ a block if there are no pending transactions.
+/// It cannot itself be a parent, and `parent_hash` always points to the most recent block. E.g.:
+/// * Validator A creates block `bA`.
+/// * Validator B has no pending transactions, so it signs an empty step message `mB`
+///   instead whose hash points to block `bA`.
+/// * Validator C also has no pending transactions, so it also signs an empty step message `mC`
+///   instead whose hash points to block `bA`.
+/// * Validator D creates block `bD`. The parent is block `bA`, and the header includes `mB` and `mC`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EmptyStep {
+	/// The signature of the other two fields, by the message's author.
 	signature: H520,
+	/// This message's step number.
 	step: u64,
+	/// The hash of the most recent block.
 	parent_hash: H256,
 }
 
@@ -420,6 +463,7 @@ impl PartialOrd for EmptyStep {
 		Some(self.cmp(other))
 	}
 }
+
 impl Ord for EmptyStep {
 	fn cmp(&self, other: &Self) -> cmp::Ordering {
 		self.step.cmp(&other.step)
@@ -436,12 +480,17 @@ impl EmptyStep {
 		EmptyStep { signature, step, parent_hash }
 	}
 
+	/// Returns `true` if the message has a valid signature by the expected proposer in the message's step.
 	fn verify(&self, validators: &dyn ValidatorSet) -> Result<bool, Error> {
 		let message = keccak(empty_step_rlp(self.step, &self.parent_hash));
 		let correct_proposer = step_proposer(validators, &self.parent_hash, self.step);
 
-		parity_crypto::publickey::verify_address(&correct_proposer, &self.signature.into(), &message)
-			.map_err(|e| e.into())
+		parity_crypto::publickey::verify_address(
+			&correct_proposer,
+			&self.signature.into(),
+			&message,
+		)
+		.map_err(Into::into)
 	}
 
 	fn author(&self) -> Result<Address, Error> {
@@ -484,12 +533,17 @@ impl Decodable for EmptyStep {
 	}
 }
 
+/// Given a signature and an rlp encoded partial empty step containing the step number and parent
+/// block hash), returns an RLP blob containing the signature and the partial empty step. This is
+/// the wire encoding of an EmptyStep.
 pub fn empty_step_full_rlp(signature: &H520, empty_step_rlp: &[u8]) -> Vec<u8> {
 	let mut s = RlpStream::new_list(2);
 	s.append(signature).append_raw(empty_step_rlp, 1);
 	s.out()
 }
 
+/// Given the hash of the parent block and a step number, returns an RLP encoded partial empty step
+/// ready to be signed.
 pub fn empty_step_rlp(step: u64, parent_hash: &H256) -> Vec<u8> {
 	let mut s = RlpStream::new_list(2);
 	s.append(&step).append(parent_hash);
@@ -550,6 +604,16 @@ pub struct AuthorityRound {
 	machine: Machine,
 	/// History of step hashes recently received from peers.
 	received_step_hashes: RwLock<BTreeMap<(u64, Address), H256>>,
+	/// If set, enables random number contract integration. It maps the transition block to the contract address.
+	randomness_contract_address: BTreeMap<u64, Address>,
+	/// The addresses of contracts that determine the block gas limit.
+	block_gas_limit_contract_transitions: BTreeMap<u64, Address>,
+	/// Memoized gas limit overrides, by block hash.
+	gas_limit_override_cache: Mutex<LruCache<H256, Option<U256>>>,
+	/// The block number at which the consensus engine switches from AuRa to AuRa with POSDAO
+	/// modifications. For details about POSDAO, see the whitepaper:
+	/// https://www.xdaichain.com/for-validators/posdao-whitepaper
+	posdao_transition: Option<BlockNumber>,
 }
 
 // header-chain validator.
@@ -654,17 +718,22 @@ fn header_signature(header: &Header, empty_steps_transition: u64) -> Result<Sign
 	.as_val::<H520>().map(Into::into)
 }
 
-// extracts the raw empty steps vec from the header seal. should only be called when there are 3 fields in the seal
-// (i.e. header.number() >= self.empty_steps_transition)
-fn header_empty_steps_raw(header: &Header) -> &[u8] {
-	header.seal().get(2).expect("was checked with verify_block_basic; has 3 fields; qed")
+// Extracts the RLP bytes of the empty steps from the header seal. Returns data only when there are
+// 3 fields in the seal. (i.e. header.number() >= self.empty_steps_transition).
+fn header_empty_steps_raw(header: &Header) -> Option<&[u8]> {
+	header.seal().get(2).map(Vec::as_slice)
 }
 
-// extracts the empty steps from the header seal. should only be called when there are 3 fields in the seal
+// Extracts the empty steps from the header seal. Returns data only when there are 3 fields in the seal
 // (i.e. header.number() >= self.empty_steps_transition).
 fn header_empty_steps(header: &Header) -> Result<Vec<EmptyStep>, ::rlp::DecoderError> {
-	let empty_steps = Rlp::new(header_empty_steps_raw(header)).as_list::<SealedEmptyStep>()?;
-	Ok(empty_steps.into_iter().map(|s| EmptyStep::from_sealed(s, header.parent_hash())).collect())
+	header_empty_steps_raw(header).map_or(Ok(vec![]), |raw| {
+		let empty_steps = Rlp::new(raw).as_list::<SealedEmptyStep>()?;
+		Ok(empty_steps
+			.into_iter()
+			.map(|s| EmptyStep::from_sealed(s, header.parent_hash()))
+			.collect())
+	})
 }
 
 // gets the signers of empty step messages for the given header, does not include repeated signers
@@ -722,7 +791,7 @@ fn verify_external(header: &Header, validators: &dyn ValidatorSet, empty_steps_t
 	let correct_proposer = validators.get(header.parent_hash(), header_step as usize);
 	let is_invalid_proposer = *header.author() != correct_proposer || {
 		let empty_steps_rlp = if header.number() >= empty_steps_transition {
-			Some(header_empty_steps_raw(header))
+			header_empty_steps_raw(header)
 		} else {
 			None
 		};
@@ -740,7 +809,7 @@ fn verify_external(header: &Header, validators: &dyn ValidatorSet, empty_steps_t
 }
 
 fn combine_proofs(signal_number: BlockNumber, set_proof: &[u8], finality_proof: &[u8]) -> Vec<u8> {
-	let mut stream = ::rlp::RlpStream::new_list(3);
+	let mut stream = RlpStream::new_list(3);
 	stream.append(&signal_number).append(&set_proof).append(&finality_proof);
 	stream.out()
 }
@@ -797,30 +866,21 @@ impl AuthorityRound {
 		let initial_step = our_params.start_step.unwrap_or(0);
 
 		let mut durations = Vec::new();
-		let mut prev_step = 0u64;
-		let mut prev_time = 0u64;
-		let mut prev_dur = our_params.step_durations[&0];
-		durations.push(StepDurationInfo {
-			transition_step: prev_step,
-			transition_timestamp: prev_time,
-			step_duration: prev_dur
-		});
-		for (time, dur) in our_params.step_durations.iter().skip(1) {
-			let (step, time) = next_step_time_duration(
-				StepDurationInfo{
-					transition_step: prev_step,
-					transition_timestamp: prev_time,
-					step_duration: prev_dur,
-				}, *time)
-				.ok_or(BlockError::TimestampOverflow)?;
-			durations.push(StepDurationInfo {
-				transition_step: step,
-				transition_timestamp: time,
-				step_duration: *dur
-			});
-			prev_step = step;
-			prev_time = time;
-			prev_dur = *dur;
+		{
+			let mut dur_info = StepDurationInfo {
+				transition_step: 0u64,
+				transition_timestamp: 0u64,
+				step_duration: our_params.step_durations[&0],
+			};
+			durations.push(dur_info);
+			for (time, dur) in our_params.step_durations.iter().skip(1) {
+				let (step, time) = next_step_time_duration(dur_info, *time)
+					.ok_or(BlockError::TimestampOverflow)?;
+				dur_info.transition_step = step;
+				dur_info.transition_timestamp = time;
+				dur_info.step_duration = *dur;
+				durations.push(dur_info);
+			}
 		}
 
 		let step = Step {
@@ -851,6 +911,10 @@ impl AuthorityRound {
 				strict_empty_steps_transition: our_params.strict_empty_steps_transition,
 				machine,
 				received_step_hashes: RwLock::new(Default::default()),
+				randomness_contract_address: our_params.randomness_contract_address,
+				block_gas_limit_contract_transitions: our_params.block_gas_limit_contract_transitions,
+				gas_limit_override_cache: Mutex::new(LruCache::new(GAS_LIMIT_OVERRIDE_CACHE_CAPACITY)),
+				posdao_transition: our_params.posdao_transition,
 			});
 
 		// Do not initialize timeouts for tests.
@@ -871,13 +935,7 @@ impl AuthorityRound {
 			(CowLike::Borrowed(&*self.validators), header.number())
 		} else {
 			let mut epoch_manager = self.epoch_manager.lock();
-			let client = match self.client.read().as_ref().and_then(|weak| weak.upgrade()) {
-				Some(client) => client,
-				None => {
-					debug!(target: "engine", "Unable to verify sig: missing client ref.");
-					return Err(EngineError::RequiresClient.into())
-				}
-			};
+			let client = self.upgrade_client_or("Unable to verify sig")?;
 
 			if !epoch_manager.zoom_to_after(&*client, &self.machine, &*self.validators, *header.parent_hash()) {
 				debug!(target: "engine", "Unable to zoom to epoch.");
@@ -888,6 +946,7 @@ impl AuthorityRound {
 		})
 	}
 
+	/// Return the `EmptyStep`s matching the step interval (non-inclusive) and parent hash.
 	fn empty_steps(&self, from_step: u64, to_step: u64, parent_hash: H256) -> Vec<EmptyStep> {
 		let from = EmptyStep {
 			step: from_step + 1,
@@ -911,48 +970,51 @@ impl AuthorityRound {
 			.collect()
 	}
 
+	/// Drops all `EmptySteps` less than or equal to the passed `step`, irregardless of the parent hash.
 	fn clear_empty_steps(&self, step: u64) {
-		// clear old `empty_steps` messages
 		let mut empty_steps = self.empty_steps.lock();
-		*empty_steps = empty_steps.split_off(&EmptyStep {
+		if empty_steps.is_empty() {
+			return;
+		}
+		let next_empty_steps = empty_steps.split_off(&EmptyStep {
 			step: step + 1,
 			parent_hash: Default::default(),
 			signature: Default::default(),
 		});
+		*empty_steps = next_empty_steps
 	}
 
-	fn handle_empty_step_message(&self, empty_step: EmptyStep) {
+	fn store_empty_step(&self, empty_step: EmptyStep) {
 		self.empty_steps.lock().insert(empty_step);
 	}
 
-	fn generate_empty_step(&self, parent_hash: &H256) {
+	/// Build an EmptyStep and broadcast it to the network.
+	fn emit_empty_step(&self, parent_hash: &H256) {
 		let step = self.step.inner.load();
 		let empty_step_rlp = empty_step_rlp(step, parent_hash);
 
 		if let Ok(signature) = self.sign(keccak(&empty_step_rlp)).map(Into::into) {
-			let message_rlp = empty_step_full_rlp(&signature, &empty_step_rlp);
-
 			let parent_hash = *parent_hash;
 			let empty_step = EmptyStep { signature, step, parent_hash };
 
 			trace!(target: "engine", "broadcasting empty step message: {:?}", empty_step);
-			self.broadcast_message(message_rlp);
-			self.handle_empty_step_message(empty_step);
-
+			if let Ok(c) = self.upgrade_client_or("could not broadcast empty step message") {
+				self.store_empty_step(empty_step);
+				c.broadcast_consensus_message(empty_step_full_rlp(&signature, &empty_step_rlp));
+			}
 		} else {
 			warn!(target: "engine", "generate_empty_step: FAIL: accounts secret key unavailable");
 		}
 	}
 
-	fn broadcast_message(&self, message: Vec<u8>) {
-		if let Some(ref weak) = *self.client.read() {
-			if let Some(c) = weak.upgrade() {
-				c.broadcast_consensus_message(message);
-			}
-		}
-	}
-
-	fn report_skipped(&self, header: &Header, current_step: u64, parent_step: u64, validators: &dyn ValidatorSet, set_number: u64) {
+	fn report_skipped(
+		&self,
+		header: &Header,
+		current_step: u64,
+		parent_step: u64,
+		validators: &dyn ValidatorSet,
+		set_number: u64
+	) {
 		// we're building on top of the genesis block so don't report any skipped steps
 		if header.number() == 1 {
 			return;
@@ -968,8 +1030,12 @@ impl AuthorityRound {
 				if skipped_primary != me {
 					// Stop reporting once validators start repeating.
 					if !reported.insert(skipped_primary) { break; }
-					trace!(target: "engine", "Reporting benign misbehaviour (cause: skipped step) at block #{}, epoch set number {}, step proposer={:#x}. Own address: {}",
-						header.number(), set_number, skipped_primary, me);
+					trace!(
+						target: "engine",
+						"Reporting benign misbehaviour (cause: skipped step) at block #{}, \
+						epoch set number {}, step proposer={:#x}. Own address: {}",
+						header.number(), set_number, skipped_primary, me
+					);
 					self.validators.report_benign(&skipped_primary, set_number, header.number());
 				} else {
 					trace!(target: "engine", "Primary that skipped is self, not self-reporting. Own address: {}", me);
@@ -982,12 +1048,9 @@ impl AuthorityRound {
 	fn build_finality(&self, chain_head: &Header, ancestry: &mut dyn Iterator<Item=Header>) -> Vec<H256> {
 		if self.immediate_transitions { return Vec::new() }
 
-		let client = match self.client.read().as_ref().and_then(|weak| weak.upgrade()) {
-			Some(client) => client,
-			None => {
-				warn!(target: "engine", "Unable to apply ancestry actions: missing client ref.");
-				return Vec::new();
-			}
+		let client = match self.upgrade_client_or("Unable to apply ancestry actions") {
+			Ok(client) => client,
+			Err(_) => return Vec::new(),
 		};
 
 		let mut epoch_manager = self.epoch_manager.lock();
@@ -1043,7 +1106,98 @@ impl AuthorityRound {
 	}
 
 	fn address(&self) -> Option<Address> {
-		self.signer.read().as_ref().map(|s| s.address() )
+		self.signer.read().as_ref().map(|s| s.address())
+	}
+
+	/// Make calls to the randomness contract.
+	fn run_randomness_phase(&self, block: &ExecutedBlock) -> Result<Vec<SignedTransaction>, Error> {
+		let contract_addr = match self.randomness_contract_address.range(..=block.header.number()).last() {
+			Some((_, &contract_addr)) => contract_addr,
+			None => return Ok(Vec::new()), // No randomness contract.
+		};
+
+		let opt_signer = self.signer.read();
+		let signer = match opt_signer.as_ref() {
+			Some(signer) => signer,
+			None => return Ok(Vec::new()), // We are not a validator, so we shouldn't call the contracts.
+		};
+		let our_addr = signer.address();
+		let client = self.upgrade_client_or("Unable to prepare block")?;
+		let full_client = client.as_full_client()
+			.ok_or_else(|| EngineError::FailedSystemCall("Failed to upgrade to BlockchainClient.".to_string()))?;
+
+		// Random number generation
+		let contract = util::BoundContract::new(&*client, BlockId::Latest, contract_addr);
+		let phase = randomness::RandomnessPhase::load(&contract, our_addr)
+			.map_err(|err| EngineError::Custom(format!("Randomness error in load(): {:?}", err)))?;
+		let data = match phase.advance(&contract, &mut OsRng, signer.as_ref())
+				.map_err(|err| EngineError::Custom(format!("Randomness error in advance(): {:?}", err)))? {
+			Some(data) => data,
+			None => return Ok(Vec::new()), // Nothing to commit or reveal at the moment.
+		};
+
+		let nonce = block.state.nonce(&our_addr)?;
+		let tx_request = TransactionRequest::call(contract_addr, data).gas_price(U256::zero()).nonce(nonce);
+		Ok(vec![full_client.create_transaction(tx_request)?])
+	}
+
+	/// Returns the reference to the client, if registered.
+	fn upgrade_client_or<'a, T>(&self, opt_error_msg: T) -> Result<Arc<dyn EngineClient>, EngineError>
+		where T: Into<Option<&'a str>>,
+	{
+		self.client.read().as_ref().and_then(|weak| weak.upgrade()).ok_or_else(|| {
+			if let Some(error_msg) = opt_error_msg.into() {
+				debug!(target: "engine", "{}: missing client ref.", error_msg);
+			}
+			EngineError::RequiresClient
+		})
+	}
+
+	fn run_posdao(&self, block: &ExecutedBlock, nonce: Option<U256>) -> Result<Vec<SignedTransaction>, Error> {
+		// Skip the rest of the function unless there has been a transition to POSDAO AuRa.
+		if self.posdao_transition.map_or(true, |posdao_block| block.header.number() < posdao_block) {
+			trace!(target: "engine", "Skipping POSDAO calls to validator set contracts");
+			return Ok(Vec::new());
+		}
+
+		let opt_signer = self.signer.read();
+		let signer = match opt_signer.as_ref() {
+			Some(signer) => signer,
+			None => return Ok(Vec::new()), // We are not a validator, so we shouldn't call the contracts.
+		};
+		let our_addr = signer.address();
+		let client = self.upgrade_client_or("Unable to prepare block")?;
+		let full_client = client.as_full_client().ok_or_else(|| {
+			EngineError::FailedSystemCall("Failed to upgrade to BlockchainClient.".to_string())
+		})?;
+
+		// Makes a constant contract call.
+		let mut call = |to: Address, data: Bytes| {
+			full_client.call_contract(BlockId::Latest, to, data).map_err(|e| format!("{}", e))
+		};
+
+		// Our current account nonce. The transactions must have consecutive nonces, starting with this one.
+		let mut tx_nonce = if let Some(tx_nonce) = nonce {
+			tx_nonce
+		} else {
+			block.state.nonce(&our_addr)?
+		};
+		let mut transactions = Vec::new();
+
+		// Creates and signs a transaction with the given contract call.
+		let mut make_transaction = |to: Address, data: Bytes| -> Result<SignedTransaction, Error> {
+			let tx_request = TransactionRequest::call(to, data).gas_price(U256::zero()).nonce(tx_nonce);
+			tx_nonce += U256::one(); // Increment the nonce for the next transaction.
+			Ok(full_client.create_transaction(tx_request)?)
+		};
+
+		// Genesis is never a new block, but might as well check.
+		let first = block.header.number() == 0;
+		for (addr, data) in self.validators.generate_engine_transactions(first, &block.header, &mut call)? {
+			transactions.push(make_transaction(addr, data)?);
+		}
+
+		Ok(transactions)
 	}
 }
 
@@ -1103,10 +1257,8 @@ impl Engine for AuthorityRound {
 	fn step(&self) {
 		self.step.inner.increment();
 		self.step.can_propose.store(true, AtomicOrdering::SeqCst);
-		if let Some(ref weak) = *self.client.read() {
-			if let Some(c) = weak.upgrade() {
-				c.update_sealing(ForceUpdateSealing::No);
-			}
+		if let Ok(c) = self.upgrade_client_or(None) {
+			c.update_sealing(ForceUpdateSealing::No);
 		}
 	}
 
@@ -1123,22 +1275,20 @@ impl Engine for AuthorityRound {
 			.map(ToString::to_string)
 			.unwrap_or_default();
 
-		let mut info = map![
-			"step".into() => step,
-			"signature".into() => signature
-		];
+		let mut info = BTreeMap::new();
+		info.insert("step".into(), step);
+		info.insert("signature".into(), signature);
 
 		if header.number() >= self.empty_steps_transition {
-			let empty_steps =
-				if let Ok(empty_steps) = header_empty_steps(header).as_ref() {
-					format!("[{}]",
-						empty_steps.iter().fold(
-							"".to_string(),
-							|acc, e| if acc.len() > 0 { acc + ","} else { acc } + &e.to_string()))
-
-				} else {
-					"".into()
-				};
+			let empty_steps = header_empty_steps(header).as_ref().map_or(String::new(), |empty_steps| {
+				format!("[{}]", empty_steps.iter().fold(String::new(), |mut acc, e| {
+					if !acc.is_empty() {
+						acc.push(',');
+					}
+					acc.push_str(&e.to_string());
+					acc
+				}))
+			});
 
 			info.insert("emptySteps".into(), empty_steps);
 		}
@@ -1167,6 +1317,14 @@ impl Engine for AuthorityRound {
 
 		let score = calculate_score(parent_step, current_step, current_empty_steps_len);
 		header.set_difficulty(score);
+		if let Some(gas_limit) = self.gas_limit_override(header) {
+			trace!(target: "engine", "Setting gas limit to {} for block {}.", gas_limit, header.number());
+			let parent_gas_limit = *parent.gas_limit();
+			header.set_gas_limit(gas_limit);
+			if parent_gas_limit != gas_limit {
+				info!(target: "engine", "Block gas limit was changed from {} to {}.", parent_gas_limit, gas_limit);
+			}
+		}
 	}
 
 	fn sealing_state(&self) -> SealingState {
@@ -1178,12 +1336,9 @@ impl Engine for AuthorityRound {
 			}
 		};
 
-		let client = match self.client.read().as_ref().and_then(|weak| weak.upgrade()) {
-			Some(client) => client,
-			None => {
-				warn!(target: "engine", "Not preparing block: missing client ref.");
-				return SealingState::NotReady;
-			}
+		let client = match self.upgrade_client_or("Not preparing block") {
+			Ok(client) => client,
+			Err(_) => return SealingState::NotReady,
 		};
 
 		let parent = match client.as_full_client() {
@@ -1216,8 +1371,9 @@ impl Engine for AuthorityRound {
 		SealingState::Ready
 	}
 
+	/// Handle incoming EmptyStep messages from the `Client`.
 	fn handle_message(&self, rlp: &[u8]) -> Result<(), EngineError> {
-		fn fmt_err<T: ::std::fmt::Debug>(x: T) -> EngineError {
+		fn fmt_err<T: fmt::Debug>(x: T) -> EngineError {
 			EngineError::MalformedMessage(format!("{:?}", x))
 		}
 
@@ -1227,7 +1383,7 @@ impl Engine for AuthorityRound {
 		if empty_step.verify(&*self.validators).unwrap_or(false) {
 			if self.step.inner.check_future(empty_step.step).is_ok() {
 				trace!(target: "engine", "handle_message: received empty step message {:?}", empty_step);
-				self.handle_empty_step_message(empty_step);
+				self.store_empty_step(empty_step);
 			} else {
 				trace!(target: "engine", "handle_message: empty step message from the future {:?}", empty_step);
 			}
@@ -1299,8 +1455,8 @@ impl Engine for AuthorityRound {
 				empty_steps.len() < self.maximum_empty_steps {
 
 				if self.step.can_propose.compare_and_swap(true, false, AtomicOrdering::SeqCst) {
-					trace!(target: "engine", "generate_seal: generating empty step at step={}, block=#{}", step, header.number());
-					self.generate_empty_step(header.parent_hash());
+					trace!(target: "engine", "generate_seal: emitting empty step at step={}, block=#{}", step, header.number());
+					self.emit_empty_step(header.parent_hash());
 				}
 
 				return Seal::None;
@@ -1326,7 +1482,6 @@ impl Engine for AuthorityRound {
 					// report any skipped primaries between the parent block and
 					// the block we're sealing, unless we have empty steps enabled
 					if header.number() < self.empty_steps_transition {
-						trace!(target: "engine", "generate_seal: reporting misbehaviour for step={}, block=#{}", step, header.number());
 						self.report_skipped(header, step, parent_step, &*validators, epoch_transition_number);
 					}
 
@@ -1428,6 +1583,13 @@ impl Engine for AuthorityRound {
 		};
 
 		block_reward::apply_block_rewards(&rewards, block, &self.machine)
+	}
+
+	fn generate_engine_transactions(&self, block: &ExecutedBlock) -> Result<Vec<SignedTransaction>, Error> {
+		let mut transactions = self.run_randomness_phase(block)?;
+		let nonce = transactions.last().map(|tx| tx.nonce + U256::one());
+		transactions.extend(self.run_posdao(block, nonce)?);
+		Ok(transactions)
 	}
 
 	/// Check the number of seal fields.
@@ -1543,8 +1705,12 @@ impl Engine for AuthorityRound {
 			match validate_empty_steps() {
 				Ok(len) => len,
 				Err(err) => {
-					trace!(target: "engine", "Reporting benign misbehaviour (cause: invalid empty steps) at block #{}, epoch set number {}. Own address: {}",
-						header.number(), set_number, self.address().unwrap_or_default());
+					trace!(
+						target: "engine",
+						"Reporting benign misbehaviour (cause: invalid empty steps) \
+						at block #{}, epoch set number {}. Own address: {}",
+						header.number(), set_number, self.address().unwrap_or_default()
+					);
 					self.validators.report_benign(header.author(), set_number, header.number());
 					return Err(err);
 				},
@@ -1558,7 +1724,10 @@ impl Engine for AuthorityRound {
 		if header.number() >= self.validate_score_transition {
 			let expected_difficulty = calculate_score(parent_step.into(), step.into(), empty_steps_len.into());
 			if header.difficulty() != &expected_difficulty {
-				return Err(From::from(BlockError::InvalidDifficulty(Mismatch { expected: expected_difficulty, found: header.difficulty().clone() })));
+				return Err(From::from(BlockError::InvalidDifficulty(Mismatch {
+					expected: expected_difficulty,
+					found: header.difficulty().clone()
+				})));
 			}
 		}
 
@@ -1574,7 +1743,10 @@ impl Engine for AuthorityRound {
 		let res = verify_external(header, &*validators, self.empty_steps_transition);
 		match res {
 			Err(Error::Engine(EngineError::NotProposer(_))) => {
-				trace!(target: "engine", "Reporting benign misbehaviour (cause: block from incorrect proposer) at block #{}, epoch set number {}. Own address: {}",
+				trace!(
+					target: "engine",
+					"Reporting benign misbehaviour (cause: block from incorrect proposer) \
+					at block #{}, epoch set number {}. Own address: {}",
 					header.number(), set_number, self.address().unwrap_or_default());
 				self.validators.report_benign(header.author(), set_number, header.number());
 			},
@@ -1610,13 +1782,7 @@ impl Engine for AuthorityRound {
 		if self.immediate_transitions { return None }
 
 		let epoch_transition_hash = {
-			let client = match self.client.read().as_ref().and_then(|weak| weak.upgrade()) {
-				Some(client) => client,
-				None => {
-					warn!(target: "engine", "Unable to check for epoch end: missing client ref.");
-					return None;
-				}
-			};
+			let client = self.upgrade_client_or("Unable to check for epoch end").ok()?;
 
 			let mut epoch_manager = self.epoch_manager.lock();
 			if !epoch_manager.zoom_to_after(&*client, &self.machine, &*self.validators, *chain_head.parent_hash()) {
@@ -1628,7 +1794,7 @@ impl Engine for AuthorityRound {
 
 		let mut hash = *chain_head.parent_hash();
 
-		let mut ancestry = std::iter::repeat_with(move || {
+		let mut ancestry = iter::repeat_with(move || {
 			chain(hash).and_then(|header| {
 				if header.number() == 0 { return None }
 				hash = *header.parent_hash();
@@ -1657,7 +1823,11 @@ impl Engine for AuthorityRound {
 
 		// Apply transitions that don't require finality and should be enacted immediately (e.g from chain spec)
 		if let Some(change) = self.validators.is_epoch_end(first, chain_head) {
-			info!(target: "engine", "Immediately applying validator set change signalled at block {}", chain_head.number());
+			info!(
+				target: "engine",
+				"Immediately applying validator set change signalled at block {}",
+				chain_head.number()
+			);
 			self.epoch_manager.lock().note_new_epoch();
 			let change = combine_proofs(chain_head.number(), &change, &[]);
 			return Some(change)
@@ -1670,7 +1840,7 @@ impl Engine for AuthorityRound {
 				// to construct transition proof. author == ec_recover(sig) known
 				// since the blocks are in the DB.
 				let mut hash = chain_head.hash();
-				let mut finality_proof: Vec<_> = std::iter::repeat_with(move || {
+				let mut finality_proof: Vec<_> = iter::repeat_with(move || {
 					chain(hash).and_then(|header| {
 						hash = *header.parent_hash();
 						if header.number() == 0 { None }
@@ -1780,6 +1950,24 @@ impl Engine for AuthorityRound {
 	fn params(&self) -> &CommonParams {
 		self.machine.params()
 	}
+
+	fn gas_limit_override(&self, header: &Header) -> Option<U256> {
+		let (_, &address) = self.block_gas_limit_contract_transitions.range(..=header.number()).last()?;
+		let client = self.upgrade_client_or("Unable to prepare block").ok()?;
+		let full_client = match client.as_full_client() {
+			Some(full_client) => full_client,
+			None => {
+				error!(target: "engine", "Failed to upgrade to BlockchainClient.");
+				return None;
+			}
+		};
+		if let Some(limit) = self.gas_limit_override_cache.lock().get_mut(&header.hash()) {
+			return *limit;
+		}
+		let limit = block_gas_limit(full_client, header, address);
+		self.gas_limit_override_cache.lock().insert(header.hash(), limit);
+		limit
+	}
 }
 
 /// A helper accumulator function mapping a step duration and a step duration transition timestamp
@@ -1790,9 +1978,10 @@ fn next_step_time_duration(info: StepDurationInfo, time: u64) -> Option<(u64, u6
 		.checked_sub(1)?
 		.checked_sub(info.transition_timestamp)?
 		.checked_div(info.step_duration)?;
+	let time_diff = step_diff.checked_mul(info.step_duration)?;
 	Some((
 		info.transition_step.checked_add(step_diff)?,
-		step_diff.checked_mul(info.step_duration)?.checked_add(time)?,
+		info.transition_timestamp.checked_add(time_diff)?,
 	))
 }
 
@@ -1805,19 +1994,22 @@ mod tests {
 	use std::time::Duration;
 	use keccak_hash::keccak;
 	use accounts::AccountProvider;
+	use ethabi_contract::use_contract;
 	use ethereum_types::{Address, H520, H256, U256};
 	use parity_crypto::publickey::Signature;
 	use common_types::{
 		header::Header,
 		engines::{Seal, params::CommonParams},
+		ids::BlockId,
 		errors::{EthcoreError as Error, EngineError},
 		transaction::{Action, Transaction},
 	};
 	use rlp::encode;
 	use ethcore::{
 		block::*,
+		miner::{Author, MinerService},
 		test_helpers::{
-			generate_dummy_client_with_spec, get_temp_state_db,
+			generate_dummy_client_with_spec, generate_dummy_client_with_spec_and_data, get_temp_state_db,
 			TestNotify
 		},
 	};
@@ -1831,7 +2023,7 @@ mod tests {
 
 	use super::{
 		AuthorityRoundParams, AuthorityRound, EmptyStep, SealedEmptyStep, StepDurationInfo,
-		calculate_score,
+		calculate_score, util::BoundContract, next_step_time_duration,
 	};
 
 	fn build_aura<F>(f: F) -> Arc<AuthorityRound> where
@@ -1852,6 +2044,9 @@ mod tests {
 			block_reward_contract_transitions: Default::default(),
 			strict_empty_steps_transition: 0,
 			two_thirds_majority_transition: 0,
+			randomness_contract_address: BTreeMap::new(),
+			block_gas_limit_contract_transitions: BTreeMap::new(),
+			posdao_transition: Some(0),
 		};
 
 		// mutate aura params
@@ -2194,6 +2389,22 @@ mod tests {
 	}
 
 	#[test]
+	fn test_next_step_time_duration() {
+		// At step 7 (time 1000), we transitioned to step duration 10.
+		let info = StepDurationInfo {
+			step_duration: 10,
+			transition_step: 7,
+			transition_timestamp: 1000,
+		};
+		// So the next transition can happen e.g. at step 12 (time 1050) or 13 (time 1060).
+		assert_eq!(Some((12, 1050)), next_step_time_duration(info, 1050));
+		assert_eq!(Some((13, 1060)), next_step_time_duration(info, 1051));
+		assert_eq!(Some((13, 1060)), next_step_time_duration(info, 1055));
+		// The next transition could also happen immediately.
+		assert_eq!(Some((7, 1000)), next_step_time_duration(info, 1000));
+	}
+
+	#[test]
 	fn test_change_step_duration() {
 		use super::Step;
 		use std::thread;
@@ -2264,7 +2475,7 @@ mod tests {
 		]);
 	}
 
-	fn assert_insufficient_proof<T: ::std::fmt::Debug>(result: Result<T, Error>, contains: &str) {
+	fn assert_insufficient_proof<T: std::fmt::Debug>(result: Result<T, Error>, contains: &str) {
 		match result {
 			Err(Error::Engine(EngineError::InsufficientProof(ref s))) =>{
 				assert!(s.contains(contains), "Expected {:?} to contain {:?}", s, contains);
@@ -2579,6 +2790,54 @@ mod tests {
 	}
 
 	#[test]
+	fn randomness_contract() -> Result<(), super::util::CallError> {
+		use_contract!(rand_contract, "../../res/contracts/test_authority_round_random.json");
+
+		env_logger::init();
+
+		let contract_addr = Address::from_str("0000000000000000000000000000000000000042").unwrap();
+		let client = generate_dummy_client_with_spec_and_data(
+			spec::new_test_round_randomness_contract, 0, 0, &[], true
+		);
+
+		let tap = Arc::new(AccountProvider::transient_provider());
+
+		let addr1 = tap.insert_account(keccak("1").into(), &"1".into()).unwrap();
+		// Unlock account so that the engine can decrypt the secret.
+		tap.unlock_account_permanently(addr1, "1".into()).expect("unlock");
+
+		let signer = Box::new((tap.clone(), addr1, "1".into()));
+		client.miner().set_author(Author::Sealer(signer.clone()));
+		client.miner().set_gas_range_target((U256::from(1000000), U256::from(1000000)));
+
+		let engine = client.engine();
+		engine.set_signer(Some(signer));
+		engine.register_client(Arc::downgrade(&client) as _);
+		let bc = BoundContract::new(&*client, BlockId::Latest, contract_addr);
+
+		// First the contract is in the commit phase, and we haven't committed yet.
+		assert!(bc.call_const(rand_contract::functions::is_commit_phase::call())?);
+		assert!(!bc.call_const(rand_contract::functions::is_committed::call(0, addr1))?);
+
+		// We produce a block and commit.
+		engine.step();
+		assert!(bc.call_const(rand_contract::functions::is_committed::call(0, addr1))?);
+
+		// After two more blocks we are in the reveal phase...
+		engine.step();
+		engine.step();
+		assert!(bc.call_const(rand_contract::functions::is_reveal_phase::call())?);
+		assert!(!bc.call_const(rand_contract::functions::sent_reveal::call(0, addr1))?);
+		assert!(bc.call_const(rand_contract::functions::get_value::call())?.is_zero());
+
+		// ...so in the next step, we reveal our random value, and the contract's random value is not zero anymore.
+		engine.step();
+		assert!(bc.call_const(rand_contract::functions::sent_reveal::call(0, addr1))?);
+		assert!(!bc.call_const(rand_contract::functions::get_value::call())?.is_zero());
+		Ok(())
+	}
+
+	#[test]
 	fn extra_info_from_seal() {
 		let (spec, tap, accounts) = setup_empty_steps();
 		let engine = &*spec.engine;
@@ -2623,26 +2882,39 @@ mod tests {
 		});
 
 		let parent_hash = H256::from_low_u64_be(1);
+		let parent_hash2 = H256::from_low_u64_be(123);
 		let signature = H520::default();
-		let step = |step: u64| EmptyStep {
-			step,
-			parent_hash,
-			signature,
-		};
+		let step = |step, parent_hash| EmptyStep { step, parent_hash, signature };
 
-		engine.handle_empty_step_message(step(1));
-		engine.handle_empty_step_message(step(3));
-		engine.handle_empty_step_message(step(2));
-		engine.handle_empty_step_message(step(1));
+		engine.store_empty_step(step(1, parent_hash));
+		engine.store_empty_step(step(3, parent_hash2));
+		engine.store_empty_step(step(2, parent_hash));
+		engine.store_empty_step(step(1, parent_hash2));
+		engine.store_empty_step(step(4, parent_hash2));
 
-		assert_eq!(engine.empty_steps(0, 4, parent_hash), vec![step(1), step(2), step(3)]);
+		assert_eq!(
+			engine.empty_steps(0, 4, parent_hash),
+			vec![step(1, parent_hash), step(2, parent_hash)]
+		);
 		assert_eq!(engine.empty_steps(2, 3, parent_hash), vec![]);
-		assert_eq!(engine.empty_steps(2, 4, parent_hash), vec![step(3)]);
+		assert_eq!(engine.empty_steps(2, 4, parent_hash), vec![]);
+		assert_eq!(
+			engine.empty_steps(2, 4, parent_hash2),
+			vec![step(3, parent_hash2)]
+		);
+		assert_eq!(
+			engine.empty_steps(2, 5, parent_hash2),
+			vec![step(3, parent_hash2), step(4, parent_hash2)]
+		);
 
 		engine.clear_empty_steps(2);
 
 		assert_eq!(engine.empty_steps(0, 3, parent_hash), vec![]);
-		assert_eq!(engine.empty_steps(0, 4, parent_hash), vec![step(3)]);
+		assert_eq!(engine.empty_steps(0, 4, parent_hash), vec![]);
+		assert_eq!(
+			engine.empty_steps(0, 5, parent_hash2),
+			vec![step(3, parent_hash2), step(4, parent_hash2)]
+		);
 	}
 
 	#[test]
@@ -2734,7 +3006,7 @@ mod tests {
 				"validators": {
 					"list" : ["0x1000000000000000000000000000000000000001"]
 				},
-                "blockRewardContractTransition": "0",
+				"blockRewardContractTransition": "0",
 				"blockRewardContractAddress": "0x2000000000000000000000000000000000000002",
 				"blockRewardContractTransitions": {
 					"7": "0x3000000000000000000000000000000000000003",
@@ -2746,9 +3018,10 @@ mod tests {
 		let params = AuthorityRoundParams::from(deserialized.params);
 		for ((block_num1, address1), (block_num2, address2)) in
 			params.block_reward_contract_transitions.iter().zip(
-				[(0u64, BlockRewardContract::new_from_address(Address::from_str("2000000000000000000000000000000000000002").unwrap())),
-				 (7u64, BlockRewardContract::new_from_address(Address::from_str("3000000000000000000000000000000000000003").unwrap())),
-				 (42u64, BlockRewardContract::new_from_address(Address::from_str("4000000000000000000000000000000000000004").unwrap())),
+				[
+					(0u64, BlockRewardContract::new_from_address(Address::from_str("2000000000000000000000000000000000000002").unwrap())),
+					(7u64, BlockRewardContract::new_from_address(Address::from_str("3000000000000000000000000000000000000003").unwrap())),
+					(42u64, BlockRewardContract::new_from_address(Address::from_str("4000000000000000000000000000000000000004").unwrap())),
 				].iter())
 		{
 			assert_eq!(block_num1, block_num2);
@@ -2765,7 +3038,7 @@ mod tests {
 				"validators": {
 					"list" : ["0x1000000000000000000000000000000000000001"]
 				},
-                "blockRewardContractTransition": "7",
+				"blockRewardContractTransition": "7",
 				"blockRewardContractAddress": "0x2000000000000000000000000000000000000002",
 				"blockRewardContractTransitions": {
 					"0": "0x3000000000000000000000000000000000000003",

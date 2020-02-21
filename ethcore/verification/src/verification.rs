@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -58,6 +58,14 @@ pub fn verify_block_basic(block: &Unverified, engine: &dyn Engine, check_seal: b
 		verify_header_params(uncle, engine, check_seal)?;
 		if check_seal {
 			engine.verify_block_basic(uncle)?;
+		}
+	}
+
+	if let Some(gas_limit) = engine.gas_limit_override(&block.header) {
+		if *block.header.gas_limit() != gas_limit {
+			return Err(From::from(BlockError::InvalidGasLimit(
+				OutOfBounds { min: Some(gas_limit), max: Some(gas_limit), found: *block.header.gas_limit() }
+			)));
 		}
 	}
 
@@ -284,21 +292,23 @@ pub(crate) fn verify_header_params(header: &Header, engine: &dyn Engine, check_s
 			found: *header.gas_used()
 		})));
 	}
-	let min_gas_limit = engine.params().min_gas_limit;
-	if header.gas_limit() < &min_gas_limit {
-		return Err(From::from(BlockError::InvalidGasLimit(OutOfBounds {
-			min: Some(min_gas_limit),
-			max: None,
-			found: *header.gas_limit()
-		})));
-	}
-	if let Some(limit) = engine.maximum_gas_limit() {
-		if header.gas_limit() > &limit {
+	if engine.gas_limit_override(header).is_none() {
+		let min_gas_limit = engine.min_gas_limit();
+		if header.gas_limit() < &min_gas_limit {
 			return Err(From::from(BlockError::InvalidGasLimit(OutOfBounds {
-				min: None,
-				max: Some(limit),
+				min: Some(min_gas_limit),
+				max: None,
 				found: *header.gas_limit()
 			})));
+		}
+		if let Some(limit) = engine.maximum_gas_limit() {
+			if header.gas_limit() > &limit {
+				return Err(From::from(BlockError::InvalidGasLimit(OutOfBounds {
+					min: None,
+					max: Some(limit),
+					found: *header.gas_limit()
+				})));
+			}
 		}
 	}
 	let maximum_extra_data_size = engine.maximum_extra_data_size();
@@ -358,8 +368,6 @@ fn verify_parent(header: &Header, parent: &Header, engine: &dyn Engine) -> Resul
 	assert!(header.parent_hash().is_zero() || &parent.hash() == header.parent_hash(),
 			"Parent hash should already have been verified; qed");
 
-	let gas_limit_divisor = engine.params().gas_limit_bound_divisor;
-
 	if !engine.is_timestamp_valid(header.timestamp(), parent.timestamp()) {
 		let now = SystemTime::now();
 		let min = CheckedSystemTime::checked_add(now, Duration::from_secs(parent.timestamp().saturating_add(1)))
@@ -382,16 +390,18 @@ fn verify_parent(header: &Header, parent: &Header, engine: &dyn Engine) -> Resul
 			found: header.number()
 		}).into());
 	}
-
-	let parent_gas_limit = *parent.gas_limit();
-	let min_gas = parent_gas_limit - parent_gas_limit / gas_limit_divisor;
-	let max_gas = parent_gas_limit + parent_gas_limit / gas_limit_divisor;
-	if header.gas_limit() <= &min_gas || header.gas_limit() >= &max_gas {
-		return Err(From::from(BlockError::InvalidGasLimit(OutOfBounds {
-			min: Some(min_gas),
-			max: Some(max_gas),
-			found: *header.gas_limit()
-		})));
+	if engine.gas_limit_override(header).is_none() {
+		let gas_limit_divisor = engine.params().gas_limit_bound_divisor;
+		let parent_gas_limit = *parent.gas_limit();
+		let min_gas = parent_gas_limit - parent_gas_limit / gas_limit_divisor;
+		let max_gas = parent_gas_limit + parent_gas_limit / gas_limit_divisor;
+		if header.gas_limit() <= &min_gas || header.gas_limit() >= &max_gas {
+			return Err(From::from(BlockError::InvalidGasLimit(OutOfBounds {
+				min: Some(min_gas),
+				max: Some(max_gas),
+				found: *header.gas_limit()
+			})));
+		}
 	}
 
 	Ok(())
@@ -522,7 +532,7 @@ mod tests {
 			// that's an invalid transaction list rlp
 			let invalid_transactions = vec![vec![0u8]];
 			header.set_transactions_root(ordered_trie_root(&invalid_transactions));
-			header.set_gas_limit(engine.params().min_gas_limit);
+			header.set_gas_limit(engine.min_gas_limit());
 			rlp.append(&header);
 			rlp.append_list::<Vec<u8>, _>(&invalid_transactions);
 			rlp.append_raw(&rlp::EMPTY_LIST_RLP, 1);
@@ -536,17 +546,17 @@ mod tests {
 	fn test_verify_block() {
 		use rlp::RlpStream;
 
-		// Test against morden
+		// Test against null_morden
 		let mut good = Header::new();
 		let spec = spec::new_test();
 		let engine = &*spec.engine;
 
-		let min_gas_limit = engine.params().min_gas_limit;
+		let min_gas_limit = engine.min_gas_limit();
 		good.set_gas_limit(min_gas_limit);
 		good.set_timestamp(40);
 		good.set_number(10);
 
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 
 		let tr1 = Transaction {
 			action: Action::Create,
@@ -640,10 +650,6 @@ mod tests {
 		let mut bad_header = good.clone();
 		bad_header.set_transactions_root(eip86_transactions_root.clone());
 		bad_header.set_uncles_hash(good_uncles_hash.clone());
-		match basic_test(&create_test_block_with_data(&bad_header, &eip86_transactions, &good_uncles), engine) {
-			Err(Error::Transaction(ref e)) if e == &parity_crypto::publickey::Error::InvalidSignature.into() => (),
-			e => panic!("Block verification failed.\nExpected: Transaction Error (Invalid Signature)\nGot: {:?}", e),
-		}
 
 		let mut header = good.clone();
 		header.set_transactions_root(good_transactions_root.clone());
@@ -753,7 +759,7 @@ mod tests {
 		let mut header = Header::default();
 		header.set_number(1);
 
-		let keypair = Random.generate().unwrap();
+		let keypair = Random.generate();
 		let bad_transactions: Vec<_> = (0..3).map(|i| Transaction {
 			action: Action::Create,
 			value: U256::zero(),

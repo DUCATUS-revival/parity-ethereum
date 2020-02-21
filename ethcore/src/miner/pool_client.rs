@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -139,7 +139,12 @@ impl<'a, C: 'a> pool::client::Client for PoolClient<'a, C> where
 		self.chain.transaction_block(TransactionId::Hash(*hash)).is_some()
 	}
 
-	fn verify_transaction(&self, tx: UnverifiedTransaction)-> Result<SignedTransaction, transaction::Error> {
+	fn verify_transaction_basic(&self, tx: &UnverifiedTransaction) -> Result<(), transaction::Error> {
+		self.engine.verify_transaction_basic(tx, &self.best_block_header)?;
+		Ok(())
+	}
+
+	fn verify_transaction(&self, tx: UnverifiedTransaction) -> Result<SignedTransaction, transaction::Error> {
 		self.engine.verify_transaction_basic(&tx, &self.best_block_header)?;
 		let tx = tx.verify_unordered()?;
 

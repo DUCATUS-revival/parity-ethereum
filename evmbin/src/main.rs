@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -45,7 +45,7 @@ use ethereum_types::{U256, Address};
 use ethcore::{json_tests, test_helpers::TrieSpec};
 use spec;
 use serde::Deserialize;
-use vm::{ActionParams, CallType};
+use vm::{ActionParams, ActionType};
 
 mod info;
 mod display;
@@ -54,7 +54,7 @@ use crate::info::{Informant, TxInput};
 
 const USAGE: &'static str = r#"
 EVM implementation for Parity.
-  Copyright 2015-2019 Parity Technologies (UK) Ltd.
+  Copyright 2015-2020 Parity Technologies (UK) Ltd.
 
 Usage:
     parity-evm state-test <file> [--chain CHAIN --only NAME --json --std-json --std-dump-json --std-out-only --std-err-only]
@@ -314,7 +314,7 @@ fn run_call<T: Informant>(args: Args, informant: T) {
 	}
 
 	let mut params = ActionParams::default();
-	params.call_type = if code.is_none() { CallType::Call } else { CallType::None };
+	params.action_type = if code.is_none() { ActionType::Call } else { ActionType::Create };
 	params.code = code.map(Arc::new);
 	params.code_address = to;
 	params.address = to;

@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -53,7 +53,7 @@ use export_hardcoded_sync::ExportHsyncCmd;
 use presale::ImportWallet;
 use account::{AccountCmd, NewAccount, ListAccounts, ImportAccounts, ImportFromGethAccounts};
 use snapshot_cmd::{self, SnapshotCommand};
-use network::{IpFilter};
+use network::{IpFilter, NatType};
 
 const DEFAULT_MAX_PEERS: u16 = 50;
 const DEFAULT_MIN_PEERS: u16 = 25;
@@ -743,7 +743,13 @@ impl Configuration {
 
 	fn net_config(&self) -> Result<NetworkConfiguration, String> {
 		let mut ret = NetworkConfiguration::new();
-		ret.nat_enabled = self.args.arg_nat == "any" || self.args.arg_nat == "upnp";
+		ret.nat_enabled = self.args.arg_nat == "any" || self.args.arg_nat == "upnp" || self.args.arg_nat == "natpmp";
+		ret.nat_type = match &self.args.arg_nat[..] {
+			"any" => NatType::Any,
+			"upnp" => NatType::UPnP,
+			"natpmp" => NatType::NatPMP,
+			_ => NatType::Nothing,
+		};
 		ret.boot_nodes = to_bootnodes(&self.args.arg_bootnodes)?;
 		let (listen, public) = self.net_addresses()?;
 		ret.listen_address = Some(format!("{}", listen));
@@ -975,9 +981,7 @@ impl Configuration {
 			},
 			track: match self.args.arg_release_track.as_ref() {
 				"stable" => ReleaseTrack::Stable,
-				"beta" => ReleaseTrack::Beta,
 				"nightly" => ReleaseTrack::Nightly,
-				"testing" => ReleaseTrack::Testing,
 				"current" => ReleaseTrack::Unknown,
 				_ => return Err("Invalid value for `--releases-track`. See `--help` for more information.".into()),
 			},
@@ -1506,23 +1510,11 @@ mod tests {
 	#[test]
 	fn should_parse_updater_options() {
 		// when
-		let conf0 = parse(&["parity", "--release-track=testing"]);
-		let conf1 = parse(&["parity", "--auto-update", "all", "--no-consensus", "--auto-update-delay", "300"]);
-		let conf2 = parse(&["parity", "--no-download", "--auto-update=all", "--release-track=beta", "--auto-update-delay=300", "--auto-update-check-frequency=100"]);
-		let conf3 = parse(&["parity", "--auto-update=xxx"]);
+		let conf0 = parse(&["parity", "--auto-update", "all", "--no-consensus", "--auto-update-delay", "300"]);
+		let conf1 = parse(&["parity", "--auto-update=xxx"]);
 
 		// then
 		assert_eq!(conf0.update_policy().unwrap(), UpdatePolicy {
-			enable_downloading: true,
-			require_consensus: true,
-			filter: UpdateFilter::Critical,
-			track: ReleaseTrack::Testing,
-			path: default_hypervisor_path(),
-			max_size: 128 * 1024 * 1024,
-			max_delay: 100,
-			frequency: 20,
-		});
-		assert_eq!(conf1.update_policy().unwrap(), UpdatePolicy {
 			enable_downloading: true,
 			require_consensus: false,
 			filter: UpdateFilter::All,
@@ -1532,17 +1524,7 @@ mod tests {
 			max_delay: 300,
 			frequency: 20,
 		});
-		assert_eq!(conf2.update_policy().unwrap(), UpdatePolicy {
-			enable_downloading: false,
-			require_consensus: true,
-			filter: UpdateFilter::All,
-			track: ReleaseTrack::Beta,
-			path: default_hypervisor_path(),
-			max_size: 128 * 1024 * 1024,
-			max_delay: 300,
-			frequency: 100,
-		});
-		assert!(conf3.update_policy().is_err());
+		assert!(conf1.update_policy().is_err());
 	}
 
 	#[test]

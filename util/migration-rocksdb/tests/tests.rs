@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -18,19 +18,15 @@
 //! A random temp directory is created. A database is created within it, and migrations
 //! are performed in temp sub-directories.
 
-#[macro_use]
-extern crate macros;
-extern crate tempdir;
-extern crate kvdb_rocksdb;
-extern crate migration_rocksdb as migration;
-
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use kvdb_rocksdb::{Database, DatabaseConfig};
+use maplit::btreemap;
+use migration_rocksdb::{Batch, Config, SimpleMigration, Migration, Manager, ChangeColumns};
 use tempdir::TempDir;
-use kvdb_rocksdb::Database;
-use migration::{Batch, Config, SimpleMigration, Migration, Manager, ChangeColumns};
 
 #[inline]
 fn db_path(path: &Path) -> PathBuf {
@@ -39,11 +35,11 @@ fn db_path(path: &Path) -> PathBuf {
 
 // initialize a database at the given directory with the given values.
 fn make_db(path: &Path, pairs: BTreeMap<Vec<u8>, Vec<u8>>) {
-	let db = Database::open_default(path.to_str().unwrap()).expect("failed to open temp database");
+	let db = Database::open(&DatabaseConfig::default(), path.to_str().unwrap()).expect("failed to open temp database");
 	{
 		let mut transaction = db.transaction();
 		for (k, v) in pairs {
-			transaction.put(None, &k, &v);
+			transaction.put(0, &k, &v);
 		}
 
 		db.write(transaction).expect("failed to write db transaction");
@@ -52,10 +48,12 @@ fn make_db(path: &Path, pairs: BTreeMap<Vec<u8>, Vec<u8>>) {
 
 // helper for verifying a migrated database.
 fn verify_migration(path: &Path, pairs: BTreeMap<Vec<u8>, Vec<u8>>) {
-	let db = Database::open_default(path.to_str().unwrap()).unwrap();
+	let db = Database::open(&DatabaseConfig::default(), path.to_str().expect("valid path")).expect("database should be there");
 
 	for (k, v) in pairs {
-		let x = db.get(None, &k).unwrap().unwrap();
+		let x = db.get(0, &k)
+			.expect("database IO should work")
+			.expect(&format!("key={:?} should be in column 0 in the db", &k));
 
 		assert_eq!(&x[..], &v[..]);
 	}
@@ -64,18 +62,9 @@ fn verify_migration(path: &Path, pairs: BTreeMap<Vec<u8>, Vec<u8>>) {
 struct Migration0;
 
 impl SimpleMigration for Migration0 {
-	fn columns(&self) -> Option<u32> {
-		None
-	}
-
-	fn version(&self) -> u32 {
-		1
-	}
-
-	fn migrated_column_index(&self) -> Option<u32> {
-		None
-	}
-
+	fn columns(&self) -> u32 { 1 }
+	fn version(&self) -> u32 { 1 }
+	fn migrated_column_index(&self) -> u32 { 0 }
 	fn simple_migrate(&mut self, mut key: Vec<u8>, mut value: Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
 		key.push(0x11);
 		value.push(0x22);
@@ -87,18 +76,9 @@ impl SimpleMigration for Migration0 {
 struct Migration1;
 
 impl SimpleMigration for Migration1 {
-	fn columns(&self) -> Option<u32> {
-		None
-	}
-
-	fn version(&self) -> u32 {
-		2
-	}
-
-	fn migrated_column_index(&self) -> Option<u32> {
-		None
-	}
-
+	fn columns(&self) -> u32 { 1 }
+	fn version(&self) -> u32 { 2 }
+	fn migrated_column_index(&self) -> u32 { 0 }
 	fn simple_migrate(&mut self, key: Vec<u8>, _value: Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
 		Some((key, vec![]))
 	}
@@ -107,20 +87,17 @@ impl SimpleMigration for Migration1 {
 struct AddsColumn;
 
 impl Migration for AddsColumn {
-	fn pre_columns(&self) -> Option<u32> { None }
-
-	fn columns(&self) -> Option<u32> { Some(1) }
-
+	fn pre_columns(&self) -> u32 { 1 }
+	fn columns(&self) -> u32 { 1 }
 	fn version(&self) -> u32 { 1 }
-
-	fn migrate(&mut self, source: Arc<Database>, config: &Config, dest: &mut Database, col: Option<u32>) -> io::Result<()> {
+	fn migrate(&mut self, source: Arc<Database>, config: &Config, dest: &mut Database, col: u32) -> io::Result<()> {
 		let mut batch = Batch::new(config, col);
 
 		for (key, value) in source.iter(col) {
 			batch.insert(key.into_vec(), value.into_vec(), dest)?;
 		}
 
-		if col == Some(1) {
+		if col == 1 {
 			batch.insert(vec![1, 2, 3], vec![4, 5, 6], dest)?;
 		}
 
@@ -133,8 +110,8 @@ fn one_simple_migration() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
-	let expected = map![vec![0x11] => vec![0x22], vec![1, 0x11] => vec![1, 0x22]];
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
+	let expected = btreemap![vec![0x11] => vec![0x22], vec![1, 0x11] => vec![1, 0x22]];
 
 	manager.add_migration(Migration0).unwrap();
 	let end_path = manager.execute(&db_path, 0).unwrap();
@@ -148,7 +125,7 @@ fn no_migration_needed() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
 
 	manager.add_migration(Migration0).unwrap();
 	manager.execute(&db_path, 1).unwrap();
@@ -160,7 +137,7 @@ fn wrong_adding_order() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
 
 	manager.add_migration(Migration1).unwrap();
 	manager.add_migration(Migration0).unwrap();
@@ -171,8 +148,8 @@ fn multiple_migrations() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
-	let expected = map![vec![0x11] => vec![], vec![1, 0x11] => vec![]];
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
+	let expected = btreemap![vec![0x11] => vec![], vec![1, 0x11] => vec![]];
 
 	manager.add_migration(Migration0).unwrap();
 	manager.add_migration(Migration1).unwrap();
@@ -186,8 +163,8 @@ fn second_migration() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
-	let expected = map![vec![] => vec![], vec![1] => vec![]];
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
+	let expected = btreemap![vec![] => vec![], vec![1] => vec![]];
 
 	manager.add_migration(Migration0).unwrap();
 	manager.add_migration(Migration1).unwrap();
@@ -201,11 +178,11 @@ fn first_and_noop_migration() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
-	let expected = map![vec![0x11] => vec![0x22], vec![1, 0x11] => vec![1, 0x22]];
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
+	let expected = btreemap![vec![0x11] => vec![0x22], vec![1, 0x11] => vec![1, 0x22]];
 
-	manager.add_migration(Migration0).unwrap();
-	let end_path = manager.execute(&db_path, 0).unwrap();
+	manager.add_migration(Migration0).expect("Migration0 can be added");
+	let end_path = manager.execute(&db_path, 0).expect("Migration0 runs clean");
 
 	verify_migration(&end_path, expected);
 }
@@ -215,8 +192,8 @@ fn noop_and_second_migration() {
 	let tempdir = TempDir::new("").unwrap();
 	let db_path = db_path(tempdir.path());
 	let mut manager = Manager::new(Config::default());
-	make_db(&db_path, map![vec![] => vec![], vec![1] => vec![1]]);
-	let expected = map![vec![] => vec![], vec![1] => vec![]];
+	make_db(&db_path, btreemap![vec![] => vec![], vec![1] => vec![1]]);
+	let expected = btreemap![vec![] => vec![], vec![1] => vec![]];
 
 	manager.add_migration(Migration1).unwrap();
 	let end_path = manager.execute(&db_path, 0).unwrap();
@@ -254,8 +231,8 @@ fn change_columns() {
 
 	let mut manager = Manager::new(Config::default());
 	manager.add_migration(ChangeColumns {
-		pre_columns: None,
-		post_columns: Some(4),
+		pre_columns: 1,
+		post_columns: 4,
 		version: 1,
 	}).unwrap();
 
@@ -266,7 +243,7 @@ fn change_columns() {
 
 	assert_eq!(db_path, new_path, "Changing columns is an in-place migration.");
 
-	let config = DatabaseConfig::with_columns(Some(4));
+	let config = DatabaseConfig::with_columns(4);
 	let db = Database::open(&config, new_path.to_str().unwrap()).unwrap();
 	assert_eq!(db.num_columns(), 4);
 }

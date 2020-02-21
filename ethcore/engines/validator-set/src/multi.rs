@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -51,6 +51,14 @@ impl Multi {
 		}
 	}
 
+	fn map_children<T, F>(&self, header: &Header, mut func: F) -> Result<T, EthcoreError>
+		where F: FnMut(&dyn ValidatorSet, bool) -> Result<T, EthcoreError>
+	{
+		let (set_block, set) = self.correct_set_by_number(header.number());
+		let first = set_block == header.number();
+		func(set, first)
+	}
+
 	fn correct_set(&self, id: BlockId) -> Option<&dyn ValidatorSet> {
 		match self.block_number.read()(id).map(|parent_block| self.correct_set_by_number(parent_block)) {
 			Ok((_, set)) => Some(set),
@@ -82,11 +90,20 @@ impl ValidatorSet for Multi {
 			.unwrap_or_else(|| Box::new(|_, _| Err("No validator set for given ID.".into())))
 	}
 
-	fn on_epoch_begin(&self, _first: bool, header: &Header, call: &mut SystemCall) -> Result<(), EthcoreError> {
-		let (set_block, set) = self.correct_set_by_number(header.number());
-		let first = set_block == header.number();
+	fn generate_engine_transactions(&self, _first: bool, header: &Header, call: &mut SystemCall)
+		-> Result<Vec<(Address, Bytes)>, EthcoreError>
+	{
+		self.map_children(header, &mut |set: &dyn ValidatorSet, first| {
+			set.generate_engine_transactions(first, header, call)
+		})
+	}
 
-		set.on_epoch_begin(first, header, call)
+	fn on_close_block(&self, header: &Header, address: &Address) -> Result<(), EthcoreError> {
+		self.map_children(header, &mut |set: &dyn ValidatorSet, _first| set.on_close_block(header, address))
+	}
+
+	fn on_epoch_begin(&self, _first: bool, header: &Header, call: &mut SystemCall) -> Result<(), EthcoreError> {
+		self.map_children(header, &mut |set: &dyn ValidatorSet, first| set.on_epoch_begin(first, header, call))
 	}
 
 	fn genesis_epoch_data(&self, header: &Header, call: &Call) -> Result<Vec<u8>, String> {
@@ -161,11 +178,13 @@ mod tests {
 		ids::BlockId,
 		verification::Unverified,
 	};
-	use client_traits::{BlockChainClient, BlockInfo, ChainInfo, ImportBlock, EngineClient, ForceUpdateSealing};
+	use client_traits::{
+		BlockChainClient, BlockInfo, ChainInfo, ImportBlock, EngineClient, ForceUpdateSealing, TransactionRequest
+	};
 	use engine::EpochChange;
 	use ethcore::{
 		miner::{self, MinerService},
-		test_helpers::{generate_dummy_client_with_spec, generate_dummy_client_with_spec_and_data},
+		test_helpers::generate_dummy_client_with_spec,
 	};
 	use ethereum_types::Address;
 	use parity_crypto::publickey::Secret;
@@ -190,7 +209,7 @@ mod tests {
 		// Wrong signer for the first block.
 		let signer = Box::new((tap.clone(), v1, "".into()));
 		client.miner().set_author(miner::Author::Sealer(signer));
-		client.transact_contract(Default::default(), Default::default()).unwrap();
+		client.transact(TransactionRequest::call(Default::default(), Default::default())).unwrap();
 		EngineClient::update_sealing(&*client, ForceUpdateSealing::No);
 		assert_eq!(client.chain_info().best_block_number, 0);
 		// Right signer for the first block.
@@ -199,7 +218,7 @@ mod tests {
 		EngineClient::update_sealing(&*client, ForceUpdateSealing::No);
 		assert_eq!(client.chain_info().best_block_number, 1);
 		// This time v0 is wrong.
-		client.transact_contract(Default::default(), Default::default()).unwrap();
+		client.transact(TransactionRequest::call(Default::default(), Default::default())).unwrap();
 		EngineClient::update_sealing(&*client, ForceUpdateSealing::No);
 		assert_eq!(client.chain_info().best_block_number, 1);
 		let signer = Box::new((tap.clone(), v1, "".into()));
@@ -207,12 +226,12 @@ mod tests {
 		EngineClient::update_sealing(&*client, ForceUpdateSealing::No);
 		assert_eq!(client.chain_info().best_block_number, 2);
 		// v1 is still good.
-		client.transact_contract(Default::default(), Default::default()).unwrap();
+		client.transact(TransactionRequest::call(Default::default(), Default::default())).unwrap();
 		EngineClient::update_sealing(&*client, ForceUpdateSealing::No);
 		assert_eq!(client.chain_info().best_block_number, 3);
 
 		// Check syncing.
-		let sync_client = generate_dummy_client_with_spec_and_data(spec::new_validator_multi, 0, 0, &[]);
+		let sync_client = generate_dummy_client_with_spec(spec::new_validator_multi);
 		sync_client.engine().register_client(Arc::downgrade(&sync_client) as _);
 		for i in 1..4 {
 			sync_client.import_block(Unverified::from_rlp(client.block(BlockId::Number(i)).unwrap().into_inner()).unwrap()).unwrap();

@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Parity Technologies (UK) Ltd.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
 // This file is part of Parity Ethereum.
 
 // Parity Ethereum is free software: you can redistribute it and/or modify
@@ -32,7 +32,7 @@ use common_types::{
 	},
 	errors::{EthcoreError as Error, EngineError},
 	snapshot::Snapshotting,
-	transaction::{self, UnverifiedTransaction},
+	transaction::{self, SignedTransaction, UnverifiedTransaction},
 };
 use client_traits::EngineClient;
 
@@ -42,7 +42,7 @@ use machine::{
 	Machine,
 	executed_block::ExecutedBlock,
 };
-use vm::{EnvInfo, Schedule, CallType, ActionValue};
+use vm::{EnvInfo, Schedule, ActionType, ActionValue};
 
 use crate::signer::EngineSigner;
 
@@ -82,7 +82,7 @@ pub fn default_system_or_code_call<'a>(machine: &'a Machine, block: &'a mut Exec
 					Some(ActionValue::Apparent(U256::zero())),
 					U256::max_value(),
 					Some(data),
-					Some(CallType::StaticCall),
+					Some(ActionType::StaticCall),
 				)
 			},
 		};
@@ -184,6 +184,14 @@ pub trait Engine: Sync + Send {
 
 	/// Allow mutating the header during seal generation. Currently only used by Clique.
 	fn on_seal_block(&self, _block: &mut ExecutedBlock) -> Result<(), Error> { Ok(()) }
+
+	/// Returns a list of transactions for a new block if we are the author.
+	///
+	/// This is called when the miner prepares a new block that this node will author and seal. It returns a list of
+	/// transactions that will be added to the block before any other transactions from the queue.
+	fn generate_engine_transactions(&self, _block: &ExecutedBlock) -> Result<Vec<SignedTransaction>, Error> {
+		Ok(Vec::new())
+	}
 
 	/// Returns the engine's current sealing state.
 	fn sealing_state(&self) -> SealingState { SealingState::External }
@@ -339,6 +347,12 @@ pub trait Engine: Sync + Send {
 		Ok(*header.author())
 	}
 
+	/// Overrides the block gas limit. Whenever this returns `Some` for a header, the next block's gas limit must be
+	/// exactly that value.
+	fn gas_limit_override(&self, _header: &Header) -> Option<U256> {
+		None
+	}
+
 	/// Get the general parameters of the chain.
 	fn params(&self) -> &CommonParams;
 
@@ -388,6 +402,11 @@ pub trait Engine: Sync + Send {
 	/// Performs pre-validation of RLP decoded transaction before other processing
 	fn decode_transaction(&self, transaction: &[u8]) -> Result<UnverifiedTransaction, transaction::Error> {
 		self.machine().decode_transaction(transaction)
+	}
+
+	/// The configured minimum gas limit.
+	fn min_gas_limit(&self) -> U256 {
+		self.params().min_gas_limit
 	}
 }
 
